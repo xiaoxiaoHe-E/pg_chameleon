@@ -108,7 +108,11 @@ class replica_engine(object):
 					
 		#pg_engine instance initialisation
 		self.pg_engine = pg_engine()
-		self.pg_engine.dest_conn = self.config["pg_conn"]
+		self.pg_engine.dest_conn = self.config["gp_conn"]
+		if self.config["gp_conn"]["use_gpss"] == True:
+			gpss_conf_path = local_conf+"gpss.yml"
+			with open(gpss_conf_path) as f:
+				self.pg_engine.gpss_conf = yaml.load(f, Loader=yaml.FullLoader)
 		self.pg_engine.logger = self.logger
 		self.pg_engine.source = self.args.source
 		self.pg_engine.full = self.args.full
@@ -152,7 +156,7 @@ class replica_engine(object):
 					print("FATAL, replica catalogue version mismatch. Expected %s, got %s" % (self.catalog_version, catalog_version))
 					sys.exit()
 		
-		if self.args.source != '*' and self.args.command != 'add_source':
+		if self.args.source != '*' and self.args.command != 'add_source' and self.args.command != 'create_replica_schema':
 			self.pg_engine.connect_db()
 			source_count = self.pg_engine.check_source()
 			self.pg_engine.disconnect_db()
@@ -211,7 +215,7 @@ class replica_engine(object):
 			sys.exit()
 		
 		config_file = open(self.config_file, 'r')
-		self.config = yaml.load(config_file.read(), Loader=yaml.FullLoader)
+		self.config = yaml.load(config_file.read(),Loader=yaml.FullLoader)
 		config_file.close()
 		
 		
@@ -241,8 +245,8 @@ class replica_engine(object):
 		"""
 			The method loads the current configuration and displays the status in tabular output
 		"""
-		config_list = [item for item in self.config if item not in ['pg_conn', 'sources', 'type_override']]
-		connection_list = [item for item in self.config["pg_conn"] if item not in ['password']]
+		config_list = [item for item in self.config if item not in ['gp_conn', 'sources', 'type_override']]
+		connection_list = [item for item in self.config["gp_conn"] if item not in ['password']]
 		type_override = pprint.pformat(self.config['type_override'], width = 20)
 		tab_body = []
 		tab_headers = ['Parameter', 'Value']
@@ -250,7 +254,7 @@ class replica_engine(object):
 			tab_row = [item, self.config[item]]
 			tab_body.append(tab_row)
 		for item in connection_list:
-			tab_row = [item, self.config["pg_conn"][item]]
+			tab_row = [item, self.config["gp_conn"][item]]
 			tab_body.append(tab_row)
 		tab_row = ['type_override', type_override]
 		tab_body.append(tab_row)
@@ -413,7 +417,8 @@ class replica_engine(object):
 				if self.config["log_dest"]  == 'stdout':
 					foreground = True
 				else:
-					foreground = False
+					#foreground = False
+					foreground = True
 					print("Sync tables process for source %s started." % (self.args.source))
 				keep_fds = [self.logger_fds]
 				init_pid = os.path.expanduser('%s/%s.pid' % (self.config["pid_dir"],self.args.source))
@@ -502,15 +507,17 @@ class replica_engine(object):
 			try:
 				tables_error = self.pg_engine.replay_replica()
 				if len(tables_error) > 0:
+					print(">>>len of table_error more than 0")
 					table_list = [item for sublist in tables_error for item in sublist]
 					tables_removed = "\n".join(table_list)
 					notifier_message = "There was an error during the replay of data. %s. The affected tables are no longer replicated." % (tables_removed)
 					self.logger.error(notifier_message)
 					self.notifier.send_message(notifier_message, 'error')
 				
-			except Exception:
-			    queue.put(traceback.format_exc())
-			    break
+			except Exception as e:
+				print(">>>xception in replay_replica:global  ",e)
+				queue.put(traceback.format_exc())
+				break
 			time.sleep(self.sleep_loop)
 			
 	def __run_replica(self):
@@ -519,6 +526,8 @@ class replica_engine(object):
 			It can be daemonised or run in foreground according with the --debug configuration or the log 
 			destination.
 		"""
+
+		print(">>>>__run_replica")
 		if "auto_maintenance" not in  self.config["sources"][self.args.source]:
 			auto_maintenance = "disabled" 
 		else:
@@ -542,11 +551,14 @@ class replica_engine(object):
 			check_timeout = self.sleep_loop
 		else:
 			check_timeout = self.sleep_loop*10
+
 		self.logger.info("Starting the replica daemons for source %s " % (self.args.source))
 		self.read_daemon = mp.Process(target=self.read_replica, name='read_replica', daemon=True, args=(queue, log_read,))
 		self.replay_daemon = mp.Process(target=self.replay_replica, name='replay_replica', daemon=True, args=(queue, log_replay,))
 		self.read_daemon.start()
 		self.replay_daemon.start()
+		print("read and reply started")
+
 		while True:
 			read_alive = self.read_daemon.is_alive()
 			replay_alive = self.replay_daemon.is_alive()
@@ -596,7 +608,7 @@ class replica_engine(object):
 		"""
 		
 		replica_pid = os.path.expanduser('%s/%s.pid' % (self.config["pid_dir"],self.args.source))
-				
+
 		if self.args.source == "*":
 			print("You must specify a source name using the argument --source")
 		else:
@@ -622,14 +634,14 @@ class replica_engine(object):
 					else:
 						foreground = False
 						print("Starting the replica process for source %s" % (self.args.source))
+						keep_fds = [self.logger_fds]
 						
-					keep_fds = [self.logger_fds]
-					app_name = "%s_replica" % self.args.source
-					replica_daemon = Daemonize(app=app_name, pid=replica_pid, action=self.__run_replica, foreground=foreground , keep_fds=keep_fds)
-					try:
-						replica_daemon.start()
-					except:
-						print("The replica process is already started. Aborting the command.")
+						app_name = "%s_replica" % self.args.source
+						replica_daemon = Daemonize(app=app_name, pid=replica_pid, action=self.__run_replica, foreground=foreground , keep_fds=keep_fds)
+						try:
+							replica_daemon.start()
+						except:
+							print("The replica process is already started. Aborting the command.")
 				
 	
 	def __stop_replica(self):
@@ -643,16 +655,22 @@ class replica_engine(object):
 				file_pid=open(replica_pid,'r')
 				pid=file_pid.read()
 				file_pid.close()
-				os.kill(int(pid),2)
-				print("Requesting the replica for source %s to stop" % (self.source))
-				while True:
-					try:
-						os.kill(int(pid),0)
-					except:
-						break
-				print("The replica process is stopped")
+				print("file_pid",file_pid)
+				if pid is not None:
+					os.kill(int(pid),2)
+					print("Requesting the replica for source %s to stop" % (self.source))
+					while True:
+						try:
+							os.kill(int(pid),0)
+						except:
+							break
+					print("The replica process is stopped")
+				else:
+					print("Cannot open file: ", replica_pid)
 			except:
 				print("An error occurred when trying to signal the replica process")
+		else:
+			print("No pid file found in ", replica_pid)
 	
 	def __set_conf_permissions(self,  cham_dir):
 		"""

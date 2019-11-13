@@ -88,7 +88,7 @@ CREATE TABLE sch_chameleon.t_last_replayed
 ;
 
 
-CREATE UNIQUE INDEX idx_t_sources_t_source ON sch_chameleon.t_sources(t_source);
+CREATE UNIQUE INDEX idx_t_sources_t_source ON sch_chameleon.t_sources(t_source, i_id_source);
 
 CREATE TABLE sch_chameleon.t_replica_batch
 (
@@ -114,10 +114,10 @@ WITH (
 );
 
 CREATE UNIQUE INDEX idx_t_replica_batch_binlog_name_position 
-    ON sch_chameleon.t_replica_batch  (i_id_source,t_binlog_name,i_binlog_position);
+    ON sch_chameleon.t_replica_batch  (i_id_source,t_binlog_name,i_binlog_position,i_id_batch);
 
 CREATE UNIQUE INDEX idx_t_replica_batch_ts_created
-	ON sch_chameleon.t_replica_batch (i_id_source,ts_created);
+	ON sch_chameleon.t_replica_batch (i_id_source,ts_created, i_id_batch);
 
 CREATE TABLE IF NOT EXISTS sch_chameleon.t_log_replica
 (
@@ -158,7 +158,7 @@ WITH (
 );
 
 CREATE UNIQUE INDEX idx_t_replica_tables_table_schema
-	ON sch_chameleon.t_replica_tables (i_id_source,v_table_name,v_schema_name);
+	ON sch_chameleon.t_replica_tables (i_id_source,v_table_name,v_schema_name, i_id_table);
 
 
 CREATE TABLE sch_chameleon.t_discarded_rows
@@ -208,87 +208,98 @@ RETURNS VOID as
 $BODY$
 DECLARE
     t_sql text;
+	t_sql_h text;
     r_tables record;
 BEGIN
     FOR r_tables IN SELECT unnest(v_log_table) as v_log_table FROM sch_chameleon.t_sources
     LOOP
         RAISE DEBUG 'CREATING TABLE %', r_tables.v_log_table;
-        t_sql:=format('
-			CREATE TABLE IF NOT EXISTS sch_chameleon.%I
-			(
-			CONSTRAINT pk_%s PRIMARY KEY (i_id_event),
-			  CONSTRAINT fk_%s FOREIGN KEY (i_id_batch) 
-				REFERENCES  sch_chameleon.t_replica_batch (i_id_batch)
-			ON UPDATE RESTRICT ON DELETE CASCADE
-			)
-			INHERITS (sch_chameleon.t_log_replica)
-			;',
+		t_sql_h := format('
+				DO $BLOCK$
+					BEGIN
+						IF EXISTS (
+							SELECT * FROM pg_catalog.pg_tables 
+							WHERE  schemaname =''sch_chameleon''
+							AND    tablename  = ''%I''
+						) THEN
+						
+						ELSE
+							CREATE TABLE sch_chameleon.%I 
+							( 
+								CONSTRAINT pk_%s PRIMARY KEY (i_id_event),
+								CONSTRAINT fk_%s FOREIGN KEY (i_id_batch) 
+									REFERENCES  sch_chameleon.t_replica_batch (i_id_batch)
+								ON UPDATE RESTRICT ON DELETE CASCADE 
+							)
+							INHERITS (sch_chameleon.t_log_replica);
+						END IF;
+					END;
+				$BLOCK$;',
+						r_tables.v_log_table,
                         r_tables.v_log_table,
                         r_tables.v_log_table,
-                        r_tables.v_log_table
-                );
-        EXECUTE t_sql;
-	t_sql:=format('
-			CREATE INDEX IF NOT EXISTS idx_id_batch_%s 
-			ON sch_chameleon.%I (i_id_batch)
-			;',
-			r_tables.v_log_table,
-                        r_tables.v_log_table
-		);
-	EXECUTE t_sql;
+						r_tables.v_log_table
+			); 	
+        EXECUTE t_sql_h;
+		t_sql_h := format('
+				DO 
+				$$
+				BEGIN
+					IF to_regclass( ''sch_chameleon.idx_id_batch_%s'' ) IS NULL THEN
+						CREATE INDEX idx_id_batch_%s ON sch_chameleon.%I (i_id_batch);
+					END IF;
+				END
+				$$;',
+				r_tables.v_log_table,
+				r_tables.v_log_table,
+							r_tables.v_log_table
+			);
+		EXECUTE t_sql_h;
     END LOOP;
 END
 $BODY$
 LANGUAGE plpgsql 
 ;
 
-CREATE OR REPLACE FUNCTION sch_chameleon.fn_replay_mysql(integer,integer,boolean)
+CREATE OR REPLACE FUNCTION sch_chameleon.fn_replay_mysql(p_i_max_events integer,p_i_id_source integer,p_b_exit_on_error boolean)
 RETURNS sch_chameleon.ty_replay_status AS
 $BODY$
-	DECLARE
-		p_i_max_events		ALIAS FOR $1;
-		p_i_id_source		ALIAS FOR $2;
-		p_b_exit_on_error	ALIAS FOR $3;
-		v_ty_status		sch_chameleon.ty_replay_status;
-		v_r_statements		record;
-		v_i_id_batch		bigint;
-		v_v_log_table		text;
-		v_t_ddl			text;
-		v_t_main_sql		text;
-		v_t_delete_sql		text;
-		v_i_replayed		integer;
-		v_i_skipped		integer;
-		v_i_ddl			integer;
-		v_i_evt_replay		bigint[];
-		v_i_evt_queue		bigint[];
-		v_ts_evt_source		timestamp without time zone;
-		v_tab_enabled		boolean;
+        DECLARE
+                v_ty_status             sch_chameleon.ty_replay_status;
+                v_r_statements          record;
+                v_i_id_batch            bigint;
+                v_v_log_table           text;
+                v_t_ddl                 text;
+                v_t_main_sql            text;
+                v_t_delete_sql          text;
+                v_i_replayed            integer;
+                v_i_skipped             integer;
+                v_i_ddl                 integer;
+                v_i_evt_replay          bigint[];
+                v_i_evt_queue           bigint[];
+                v_ts_evt_source         timestamp without time zone;
+                v_tab_enabled           boolean;
 
-	BEGIN
-		v_i_replayed:=0;
-		v_i_ddl:=0;
-		v_i_skipped:=0;
-		v_ty_status.b_continue:=FALSE;
-		v_ty_status.b_error:=FALSE;		
-		RAISE DEBUG 'Searching batches to replay for source id: %', p_i_id_source;
-		v_i_id_batch:= (
-			SELECT 
-				bat.i_id_batch 
-			FROM 
-				sch_chameleon.t_replica_batch bat
-				INNER JOIN  sch_chameleon.t_batch_events evt
-				ON
-					evt.i_id_batch=bat.i_id_batch
-			WHERE 
-					bat.b_started 
-				AND	bat.b_processed 
-				AND	NOT bat.b_replayed
-				AND	bat.i_id_source=p_i_id_source
-			ORDER BY 
-				bat.ts_created 
-			LIMIT 1
-			)
-		;
+        BEGIN
+                v_i_replayed:=0;
+                v_i_ddl:=0;
+                v_i_skipped:=0;
+                v_ty_status.b_continue:=FALSE;
+                v_ty_status.b_error:=FALSE;
+                RAISE NOTICE 'Searching batches to replay for source id: %', p_i_id_source;
+                v_i_id_batch :=(
+                        select  min(bat.i_id_batch)
+                        FROM
+                                sch_chameleon.t_replica_batch bat, sch_chameleon.t_batch_events evt
+                        WHERE
+                                        bat.b_started
+                                AND     bat.b_processed
+                                AND     NOT bat.b_replayed
+                                AND     bat.i_id_source= p_i_id_source
+								AND	    evt.i_id_batch=bat.i_id_batch
+						group by bat.i_id_batch
+						ORDER BY bat.ts_created 
+                );
 
 		v_v_log_table:=(
 			SELECT 
@@ -301,12 +312,12 @@ $BODY$
 		;
 		IF v_i_id_batch IS NULL 
 		THEN
-			RAISE DEBUG 'There are no batches available for replay';
+			RAISE NOTICE 'There are no batches available for replay';
 			RETURN v_ty_status;
 		END IF;
 		
-		RAISE DEBUG 'Found id_batch %, data in log table %', v_i_id_batch,v_v_log_table;
-		RAISE DEBUG 'Building a list of event id with max length %...', p_i_max_events;
+		RAISE NOTICE 'Found id_batch %, data in log table %', v_i_id_batch,v_v_log_table;
+		RAISE NOTICE 'Building a list of event id with max length %...', p_i_max_events;
 		v_i_evt_replay:=(
 			SELECT 
 				i_id_event[1:p_i_max_events] 
@@ -326,7 +337,7 @@ $BODY$
 				i_id_batch=v_i_id_batch
 		);
 		
-		RAISE DEBUG 'Finding the last executed event''s timestamp...';
+		RAISE NOTICE 'Finding the last executed event''s timestamp...';
 		v_ts_evt_source:=(
 			SELECT 
 				to_timestamp(i_my_event_time)
@@ -336,8 +347,9 @@ $BODY$
 					i_id_event=v_i_evt_replay[array_length(v_i_evt_replay,1)]
 				AND	i_id_batch=v_i_id_batch
 		);
+		RAISE NOTICE 'the last executed event ts: %', v_ts_evt_source;
 		
-		RAISE DEBUG 'Generating the main loop sql';
+		RAISE NOTICE 'Generating the main loop sql';
 
 		v_t_main_sql:=format('
 			SELECT 
@@ -440,24 +452,24 @@ $BODY$
 					FROM 
 					(
 						SELECT 
-							log.i_id_event,
-							log.v_table_name,
-							log.v_schema_name,
-							log.enm_binlog_event,
-							log.t_binlog_name,
-							log.i_binlog_position,
-							coalesce(log.jsb_event_after,''{"foo":"bar"}''::jsonb) as jsb_event_after,
-							(jsonb_each_text(coalesce(log.jsb_event_after,''{"foo":"bar"}''::jsonb))).key AS t_column,
-							log.jsb_event_before,
-							log.t_query as t_query,
-							log.ts_event_datetime,
+							log_s.i_id_event,
+							log_s.v_table_name,
+							log_s.v_schema_name,
+							log_s.enm_binlog_event,
+							log_s.t_binlog_name,
+							log_s.i_binlog_position,
+							coalesce(log_s.jsb_event_after,''{"foo":"bar"}''::jsonb) as jsb_event_after,
+							(jsonb_each_text(coalesce(log_s.jsb_event_after,''{"foo":"bar"}''::jsonb))).key AS t_column,
+							log_s.jsb_event_before,
+							log_s.t_query as t_query,
+							log_s.ts_event_datetime,
 							v_table_pkey
 						FROM 
-							sch_chameleon.%I log
+							sch_chameleon.%I log_s
 							INNER JOIN sch_chameleon.t_replica_tables tab
 								ON 
-										tab.v_table_name=log.v_table_name
-									AND	tab.v_schema_name=log.v_schema_name
+										tab.v_table_name=log_s.v_table_name
+									AND	tab.v_schema_name=log_s.v_schema_name
 						WHERE
 								tab.b_replica_enabled
 							AND	i_id_event = ANY(%L)
@@ -493,7 +505,7 @@ $BODY$
 				i_id_event ASC
 			;		
 		',v_v_log_table,v_i_evt_replay);
-		RAISE DEBUG '%',v_t_main_sql;
+		/*RAISE NOTICE '%',v_t_main_sql; */
 		FOR v_r_statements IN EXECUTE v_t_main_sql
 		LOOP
 			
@@ -508,7 +520,7 @@ $BODY$
 				THEN
 				RAISE NOTICE 'An error occurred when replaying data for the table %.%',v_r_statements.v_schema_name,v_r_statements.v_table_name;
 				RAISE NOTICE 'SQLSTATE: % - ERROR MESSAGE %',SQLSTATE, SQLERRM;
-				RAISE DEBUG 'SQL EXECUTED: % ',v_r_statements.t_sql;
+				RAISE NOTICE 'SQL EXECUTED: % ',v_r_statements.t_sql;
 				RAISE NOTICE 'The table %.% has been removed from the replica',v_r_statements.v_schema_name,v_r_statements.v_table_name;
 				v_ty_status.v_table_error:=array_append(v_ty_status.v_table_error, format('%I.%I SQLSTATE: %s - ERROR MESSAGE: %s',v_r_statements.v_schema_name,v_r_statements.v_table_name,SQLSTATE, SQLERRM)::character varying) ;
 				RAISE NOTICE 'Adding error log entry for table %.% ',v_r_statements.v_schema_name,v_r_statements.v_table_name;
@@ -537,9 +549,9 @@ $BODY$
 								quote_literal(v_r_statements.t_sql) as t_sql,
 								format('%s - %s',SQLSTATE, SQLERRM) as t_error_message
 							FROM
-								sch_chameleon.t_log_replica  log
+								sch_chameleon.t_log_replica  replog
 							WHERE 
-								log.i_id_event=v_r_statements.i_id_event
+								replog.i_id_event=v_r_statements.i_id_event
 						;
 				IF p_b_exit_on_error
 				THEN
@@ -558,7 +570,7 @@ $BODY$
 					;
 
 					RAISE NOTICE 'Deleting the log entries for the table %.% ',v_r_statements.v_schema_name,v_r_statements.v_table_name;
-					DELETE FROM sch_chameleon.t_log_replica  log
+					DELETE FROM sch_chameleon.t_log_replica  replog
 					WHERE
 							v_table_name=v_r_statements.v_table_name
 						AND	v_schema_name=v_r_statements.v_schema_name
@@ -566,9 +578,11 @@ $BODY$
 					;
 				END IF;
 			END;
+			/* handling exceptions */
 		END LOOP;
 		IF v_ts_evt_source IS NOT NULL
 		THEN
+			RAISE NOTICE 'v_ts_evt_source(last executed event) in not null, updating t_last_replayed';
 			UPDATE sch_chameleon.t_last_replayed
 				SET
 					ts_last_replayed=v_ts_evt_source
@@ -584,7 +598,7 @@ $BODY$
 			;
 				
 			GET DIAGNOSTICS v_i_skipped = ROW_COUNT;
-			RAISE DEBUG 'SKIPPED ROWS: % ',v_i_skipped;
+			RAISE NOTICE 'SKIPPED ROWS: % ',v_i_skipped;
 
 			UPDATE ONLY sch_chameleon.t_replica_batch  
 			SET 
@@ -602,6 +616,7 @@ $BODY$
 			;
 
 			v_ty_status.b_continue:=FALSE;
+
 		ELSE
 			UPDATE ONLY sch_chameleon.t_replica_batch  
 			SET 
@@ -629,22 +644,19 @@ $BODY$
 			v_ty_status.b_continue:=TRUE;
 			RETURN v_ty_status;
 		END IF;
+
 		v_i_id_batch:= (
-			SELECT 
-				bat.i_id_batch 
+			SELECT min(bat.i_id_batch)
 			FROM 
-				sch_chameleon.t_replica_batch bat
-				INNER JOIN  sch_chameleon.t_batch_events evt
-				ON
-					evt.i_id_batch=bat.i_id_batch
+				sch_chameleon.t_replica_batch bat, sch_chameleon.t_batch_events evt
 			WHERE 
 					bat.b_started 
 				AND	bat.b_processed 
 				AND	NOT bat.b_replayed
 				AND	bat.i_id_source=p_i_id_source
-			ORDER BY 
-				bat.ts_created 
-			LIMIT 1
+				AND evt.i_id_batch=bat.i_id_batch
+			GROUP BY bat.i_id_batch
+			ORDER BY bat.ts_created 
 			)
 		;
 		
@@ -662,6 +674,7 @@ $BODY$
 	
 $BODY$
 LANGUAGE plpgsql;
+
 
 
 --CUSTOM AGGREGATES

@@ -1,0 +1,68 @@
+---
+#global settings
+pid_dir: '~/.pg_chameleon/pid/'
+log_dir: '~/.pg_chameleon/logs/'
+log_dest: file
+log_level: info
+log_days_keep: 10
+rollbar_key: ''
+rollbar_env: ''
+
+# type_override allows the user to override the default type conversion into a different one. 
+type_override:
+  "tinyint(1)":
+    override_to: true
+    override_tables:
+      - "*"
+
+  
+      
+
+#postgres  destination connection
+pg_conn:
+  host: "localhost"
+  port: "5432"    
+  user: "gpadmin"
+  password: "1234"
+  database: "pgdb"
+  charset: "utf8"
+    
+sources:
+  mysql:
+    db_conn:
+      host: "localhost"
+      port: "3306"
+      user: "usr_replic"
+      password: "1234"
+      charset: 'utf8'
+      connect_timeout: 10
+    schema_mappings:
+      testdb: pgdb
+    limit_tables:
+      - testdb.table1
+    skip_tables:
+      - testdb.table2
+    grant_select_to:
+      - usr_replica
+    lock_timeout: "120s"
+    my_server_id: 100
+    replica_batch_size: 10000
+    replay_max_rows: 10000
+    batch_retention: '1 day'
+    copy_max_memory: "300M"
+    copy_mode: 'file'  
+    out_dir: /tmp
+    sleep_loop: 1
+    on_error_replay: continue
+    on_error_read: continue
+    auto_maintenance: "disabled"
+    gtid_enable: No
+    type: mysql
+    skip_events:
+      insert:
+        - testdb.table2 #skips inserts on the table delphis_mediterranea.foo
+      delete:
+        - testdb #skips deletes on schema delphis_mediterranea
+      update:
+    
+

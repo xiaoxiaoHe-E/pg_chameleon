@@ -1,0 +1,17 @@
+host: "127.0.0.1"
+gpssListenPort: "5000"
+gpdbPort:  5432
+
+username: "gpadmin"
+password: "changeme"
+database: "pgdb"
+useSSL: False
+
+ErrorLimitCount: 10          
+ErrorLimitPercentage: 10
+
+MaxErrorRows: 10
+
+writeEvery: 3000 
+#for grpc has a max message length (4M) restriction
+#send write request every 3000 lines

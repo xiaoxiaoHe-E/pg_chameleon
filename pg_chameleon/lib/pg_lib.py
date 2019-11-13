@@ -11,6 +11,20 @@ import os
 import binascii
 from distutils.sysconfig import get_python_lib
 import multiprocessing as mp
+import datetime
+import pandas as pd
+
+import pdb
+
+from ..gpss import data_pb2
+from ..gpss import data_pb2_grpc
+from ..gpss import gpss_pb2
+from ..gpss import gpss_pb2_grpc
+import grpc
+import google.protobuf
+import google.protobuf.text_format as tf
+from google.protobuf.timestamp_pb2 import Timestamp
+from dateutil.parser import parse
 
 class pg_encoder(json.JSONEncoder):
 	def default(self, obj):
@@ -86,7 +100,8 @@ class pgsql_source(object):
 		self.pg_engine.connect_db()
 		self.schema_mappings = self.pg_engine.get_schema_mappings()
 		self.pg_engine.schema_tables = self.schema_tables
-
+		
+		
 	
 	def __connect_db(self, auto_commit=True, dict_cursor=False):
 		"""
@@ -503,6 +518,7 @@ class pgsql_source(object):
 		if not db_in_recovery[0]:
 			queue.put(False)
 		db_conn.close()
+
 	
 	def init_replica(self):
 		"""
@@ -510,6 +526,8 @@ class pgsql_source(object):
 		"""
 		self.logger.debug("starting init replica for source %s" % self.source)
 		self.__init_sync()
+		if self.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
 		self.schema_list = [schema for schema in self.schema_mappings]
 		self.__build_table_exceptions()
 		self.__get_table_list()
@@ -618,7 +636,7 @@ class pg_engine(object):
 
 		"""
 		self.logger.debug("Changing the autocommit flag to %s" % auto_commit)
-		self.pgsql_conn.set_session(autocommit=auto_commit)
+		self.pgsql_conn.autocommit = True
 
 	
 	def connect_db(self):
@@ -639,6 +657,24 @@ class pg_engine(object):
 		elif self.pgsql_conn:
 			self.logger.debug("There is already a database connection active.")
 			
+	def connectToGpss(self):
+		#connect to gpss
+		self.logger.debug("Connecting to gpss")
+		self.gpss_channel = grpc.insecure_channel(self.gpss_conf["host"] + ':' + self.gpss_conf["gpssListenPort"] )   #port of gpss
+		self.gpss_stub = gpss_pb2_grpc.GpssStub(self.gpss_channel)
+		mConnectReq = gpss_pb2.ConnectRequest(
+			Host=self.gpss_conf["host"],
+			Port=self.gpss_conf["gpdbPort"],       #port of gpdb
+			Username=self.gpss_conf["username"],
+			Password=self.gpss_conf["password"],
+			DB=self.gpss_conf["database"],
+			UseSSL=self.gpss_conf["useSSL"]
+		)
+		self.gpss_session = self.gpss_stub.Connect(mConnectReq)
+		if self.gpss_session is None:
+			self.logger.error("error when connect to gpss")
+			sys.exit()
+
 
 	def disconnect_db(self):
 		"""
@@ -1162,9 +1198,11 @@ class pg_engine(object):
 			replay_max_rows = self.source_config["replay_max_rows"]
 			exit_on_error = True if self.source_config["on_error_replay"]=='exit' else False
 			while continue_loop:
-				sql_replay = """SELECT * FROM sch_chameleon.fn_replay_mysql(%s,%s,%s);""";
+				sql_replay = """SELECT * FROM sch_chameleon.fn_replay_mysql(%s,%s,%s);"""
+				print("fn_replay_mysql args: ", replay_max_rows, self.i_id_source, exit_on_error)
 				self.pgsql_cur.execute(sql_replay, (replay_max_rows, self.i_id_source, exit_on_error))
 				replay_status = self.pgsql_cur.fetchone()
+				print("reply_status: ",replay_status)
 				if replay_status[0]:
 					self.logger.info("Replayed at most %s rows for source %s" % (replay_max_rows, self.source) )
 				replica_paused = self.get_replica_paused()
@@ -1176,6 +1214,7 @@ class pg_engine(object):
 					raise Exception('The replay process crashed')
 				if replay_status[2]:
 					tables_error.append(replay_status[2])
+		print("fn_replay_mysql finished")
 		return tables_error
 			
 	
@@ -1876,7 +1915,8 @@ class pg_engine(object):
 				table_schema = self.schema_loading[schema]["destination"]
 				where_cond = "format('%%I.%%I','%s','%s')" % (table_schema, table_name)
 				list_conditions.append(where_cond)
-		sql_cleanup = "DELETE FROM sch_chameleon.{} WHERE format('%%I.%%I',v_schema_name,v_table_name) IN (%s) ;" % ' ,'.join(list_conditions)
+		sql_cleanup = "DELETE FROM sch_chameleon.{} WHERE format('%%I.%%I',v_schema_name,v_table_name) IN ('%s') ;" % ' ,'.join(list_conditions)
+		#sql_cleanup = "DELETE FROM sch_chameleon.{} WHERE format('%%I.%%I',v_schema_name,v_table_name) IN (%s) ;" % ' ,'.join(list_conditions)
 		for log_table in log_tables[0]:
 			self.logger.debug("Cleaning up log events in log table %s " % (log_table,))
 			sql_clean_log = sql.SQL(sql_cleanup).format(sql.Identifier(log_table))
@@ -1914,6 +1954,7 @@ class pg_engine(object):
 			:param query_data: query's metadata (schema,binlog, etc.)
 			:param destination_schema: the postgresql destination schema determined using the schema mappings.
 		"""
+		print(">>in write_ddl (insert log_table)")
 		pg_ddl = self.__generate_ddl(token, destination_schema)
 		self.logger.debug("Translated query: %s " % (pg_ddl,))
 		log_table = query_data["log_table"]
@@ -1948,6 +1989,8 @@ class pg_engine(object):
 				)
 			;
 		""").format(sql.Identifier(log_table), )
+
+		print(log_table)
 		
 		self.pgsql_cur.execute(sql_insert, insert_vals)
 	
@@ -2142,39 +2185,34 @@ class pg_engine(object):
 		else:
 			exclude_id = -1
 		schema_mappings = json.dumps(self.sources[self.source]["schema_mappings"])
-		if schema_mappings=='null':
-			print("Schema mapping cannot be empty. Check your configuration file.")
-			sys.exit()
+		sql_check = """
+					SELECT 
+						(jsonb_each_text(jsb_schema_mappings)).value AS dest_schema
+					FROM 
+						sch_chameleon.t_sources
+					WHERE 
+						i_id_source <> %s
+						;
+					"""
+
+		sql_check2 = """
+					SELECT 
+						value AS dest_schema 
+					FROM 
+						json_each_text(%s::json) 
+					;
+					"""
+		
+		self.pgsql_cur.execute(sql_check, (exclude_id, ))
+		check_mappings = self.pgsql_cur.fetchall()
+		if check_mappings:
+			check_mappings = check_mappings + self.pgsql_cur.execute(sql_check2, (schema_mappings, ))
 		else:
-			sql_check = """
-				WITH t_check  AS
-				(
-						SELECT 
-							(jsonb_each_text(jsb_schema_mappings)).value AS dest_schema
-						FROM 
-							sch_chameleon.t_sources
-						WHERE 
-							i_id_source <> %s
-					UNION ALL
-						SELECT 
-							value AS dest_schema 
-						FROM 
-							json_each_text(%s::json) 
-				)
-			SELECT 
-				count(dest_schema),
-				dest_schema 
-			FROM 
-				t_check 
-			GROUP BY 
-				dest_schema
-			HAVING 
-				count(dest_schema)>1
-			;
-			"""
-			self.pgsql_cur.execute(sql_check, (exclude_id, schema_mappings, ))
-			check_mappings = self.pgsql_cur.fetchone()
-			return check_mappings
+			check_mappings = self.pgsql_cur.execute(sql_check2, (schema_mappings, ))
+	
+		if check_mappings is None or len(check_mappings) < 2 :
+			return None
+		return True
 		
 	def check_source(self):
 		"""
@@ -2233,8 +2271,23 @@ class pg_engine(object):
 						)
 					; 
 				"""
+				sql_add_h = """
+					INSERT INTO sch_chameleon.t_sources 
+						( 
+							t_source,
+							jsb_schema_mappings,
+							enm_source_type
+						) 
+					VALUES 
+						(
+							%s,
+							%s,
+							%s
+						)
+					; 
+				"""
 				self.pgsql_cur.execute(sql_add, (self.source, schema_mappings, log_table_1, log_table_2, source_type))
-				
+				#self.pgsql_cur.execute(sql_add_h, (self.source, schema_mappings, source_type))
 				sql_parts = """SELECT sch_chameleon.fn_refresh_parts() ;"""
 				self.pgsql_cur.execute(sql_parts)
 				self.insert_source_timings()
@@ -2312,7 +2365,7 @@ class pg_engine(object):
 		ddl_enum=[]
 		ddl_composite=[]
 		for column in table_metadata:
-			column_name = column["column_name"]
+			column_name = column["COLUMN_NAME"]
 			if column["column_default"]:
 				default_value = column["column_default"]
 			else:
@@ -2323,14 +2376,14 @@ class pg_engine(object):
 				col_is_null="NULL"
 			column_type = column["type_format"]
 			if column_type == "enum":
-				enum_type = '"%s"."enum_%s_%s"' % (destination_schema, table_name[0:20], column["column_name"][0:20])
+				enum_type = '"%s"."enum_%s_%s"' % (destination_schema, table_name[0:20], column["COLUMN_NAME"][0:20])
 				sql_drop_enum = 'DROP TYPE IF EXISTS %s CASCADE;' % enum_type
 				sql_create_enum = 'CREATE TYPE %s AS ENUM (%s);' % ( enum_type,  column["typ_elements"])
 				ddl_enum.append(sql_drop_enum)
 				ddl_enum.append(sql_create_enum)
 				column_type=enum_type
 			if column_type == "composite":
-				composite_type = '"%s"."typ_%s_%s"' % (destination_schema, table_name[0:20], column["column_name"][0:20])
+				composite_type = '"%s"."typ_%s_%s"' % (destination_schema, table_name[0:20], column["COLUMN_NAME"][0:20])
 				sql_drop_composite = 'DROP TYPE IF EXISTS %s CASCADE;' % composite_type
 				sql_create_composite = 'CREATE TYPE %s AS (%s);' % ( composite_type,  column["typ_elements"])
 				ddl_composite.append(sql_drop_composite)
@@ -2375,13 +2428,13 @@ class pg_engine(object):
 		ddl_enum=[]
 		table_ddl = {}
 		for column in table_metadata:
-			if column["is_nullable"]=="NO":
+			if column["IS_NULLABLE"]=="NO":
 					col_is_null="NOT NULL"
 			else:
 				col_is_null="NULL"
 			column_type = self.get_data_type(column, schema, table_name)
 			if column_type == "enum":
-				enum_type = '"%s"."enum_%s_%s"' % (destination_schema, table_name[0:20], column["column_name"][0:20])
+				enum_type = '"%s"."enum_%s_%s"' % (destination_schema, table_name[0:20], column["schema_name"][0:20])
 				sql_drop_enum = 'DROP TYPE IF EXISTS %s CASCADE;' % enum_type
 				sql_create_enum = 'CREATE TYPE %s AS ENUM %s;' % ( enum_type,  column["enum_list"])
 				ddl_enum.append(sql_drop_enum)
@@ -2391,9 +2444,9 @@ class pg_engine(object):
 				column_type="%s (%s)" % (column_type, str(column["character_maximum_length"]))
 			if column_type == 'numeric':
 				column_type="%s (%s,%s)" % (column_type, str(column["numeric_precision"]), str(column["numeric_scale"]))
-			if column["extra"] == "auto_increment":
+			if column["EXTRA"] == "auto_increment":
 				column_type = "bigserial"
-			ddl_columns.append(  ' "%s" %s %s   ' %  (column["column_name"], column_type, col_is_null ))
+			ddl_columns.append(  ' "%s" %s %s   ' %  (column["COLUMN_NAME"], column_type, col_is_null ))
 		def_columns=str(',').join(ddl_columns)
 		table_ddl["enum"] = ddl_enum
 		table_ddl["composite"] = []
@@ -2416,10 +2469,10 @@ class pg_engine(object):
 		
 		for index in index_data:
 				table_timestamp = str(int(time.time()))
-				indx = index["index_name"]
+				indx = index["INDEX_NAME"]
 				self.logger.debug("Generating the DDL for index %s" % (indx))
 				index_columns = ['"%s"' % column for column in index["index_columns"]]
-				non_unique = index["non_unique"]
+				non_unique = index["NON_UNIQUE"]
 				if indx =='PRIMARY':
 					pkey_name = "pk_%s_%s_%s " % (table[0:10],table_timestamp,  self.idx_sequence)
 					pkey_def = 'ALTER TABLE "%s"."%s" ADD CONSTRAINT "%s" PRIMARY KEY (%s) ;' % (schema, table, pkey_name, ','.join(index_columns))
@@ -2454,18 +2507,18 @@ class pg_engine(object):
 			filter_by_logid = b""
 		sql_log = """
 			SELECT
-				log.i_id_log,
+				log_t.i_id_log,
 				src.t_source,
-				log.i_id_batch,
-				log.v_table_name,
-				log.v_schema_name,
-				log.ts_error,
-				log.t_sql,
-				log.t_error_message
+				log_t.i_id_batch,
+				log_t.v_table_name,
+				log_t.v_schema_name,
+				log_t.ts_error,
+				log_t.t_sql,
+				log_t.t_error_message
 			FROM 
-				sch_chameleon.t_error_log log 
+				sch_chameleon.t_error_log log_t 
 				LEFT JOIN sch_chameleon.t_sources src
-				ON src.i_id_source=log.i_id_source
+				ON src.i_id_source=log_t.i_id_source
 			%s
 		;
 
@@ -2660,6 +2713,20 @@ class pg_engine(object):
 					ts_last_replayed=NULL
 			;
 		"""
+		sql_replay_h = """
+			DO $$
+			BEGIN
+				UPDATE sch_chameleon.t_last_replayed
+				SET ts_last_replayed=NULL WHERE i_id_source = %s;
+				if not found then
+					INSERT INTO sch_chameleon.t_last_replayed (i_id_source)
+					VALUES (%s);
+				end if;
+				exception when others then
+					UPDATE sch_chameleon.t_last_replayed
+					SET ts_last_replayed=NULL WHERE i_id_source = %s;
+			END $$ LANGUAGE plpgsql ;
+		"""
 		sql_receive = """
 			INSERT INTO sch_chameleon.t_last_received
 				(
@@ -2675,8 +2742,22 @@ class pg_engine(object):
 					ts_last_received=NULL
 			;
 		"""
-		self.pgsql_cur.execute(sql_replay, (self.i_id_source, ))
-		self.pgsql_cur.execute(sql_receive, (self.i_id_source, ))
+		sql_receive_h = """
+			DO $$
+			BEGIN
+				UPDATE sch_chameleon.t_last_received
+				SET ts_last_received=NULL WHERE i_id_source = %s;
+				if not found then
+					INSERT INTO sch_chameleon.t_last_received (i_id_source)
+					VALUES (%s);
+				end if;
+				exception when others then
+					UPDATE sch_chameleon.t_last_received
+					SET ts_last_received=NULL WHERE i_id_source = %s;
+			END $$ LANGUAGE plpgsql ;
+		"""
+		self.pgsql_cur.execute(sql_replay_h, (self.i_id_source,self.i_id_source,self.i_id_source, ))
+		self.pgsql_cur.execute(sql_receive_h, (self.i_id_source,self.i_id_source,self.i_id_source, ))
 
 	def  generate_default_statements(self, schema,  table, column, create_column=None):
 		"""
@@ -2746,11 +2827,11 @@ class pg_engine(object):
 				if override_tables[0] == '*' or table_full in override_tables:
 					column_type = override_to
 				else:
-					column_type = self.type_dictionary[column["data_type"]]
+					column_type = self.type_dictionary[column["DATA_TYPE"]]
 			except KeyError:
-				column_type = self.type_dictionary[column["data_type"]]
+				column_type = self.type_dictionary[column["DATA_TYPE"]]
 		else:
-			column_type = self.type_dictionary[column["data_type"]]
+			column_type = self.type_dictionary[column["DATA_TYPE"]]
 		return column_type
 	
 	def set_application_name(self, action=""):
@@ -2764,6 +2845,8 @@ class pg_engine(object):
 			app_name = "[pg_chameleon] -  action: %s" % (action) 
 		sql_app_name="""SET application_name=%s; """
 		self.pgsql_cur.execute(sql_app_name, (app_name , ))
+
+
 		
 	def write_batch(self, group_insert):
 		"""
@@ -2777,12 +2860,15 @@ class pg_engine(object):
 			
 			:param group_insert: the event data built in mysql_engine
 		"""
+		print(">>>in wriet_batch")
 		csv_file=io.StringIO()
 		self.set_application_name("writing batch")
 		insert_list=[]
+
 		for row_data in group_insert:
 			global_data=row_data["global_data"]
 			event_after=row_data["event_after"]
+			print("event_after", type(event_after), event_after)
 			event_before=row_data["event_before"]
 			log_table=global_data["log_table"]
 			insert_list.append(self.pgsql_cur.mogrify("%s,%s,%s,%s,%s,%s,%s,%s,%s" ,  (
@@ -2825,7 +2911,15 @@ class pg_engine(object):
 					ESCAPE '''' 
 				;
 			""").format(sql.Identifier(log_table))
-			self.pgsql_cur.copy_expert(sql_copy,csv_file)
+			print("log_table: ", log_table)
+			self.pgsql_cur.copy_expert(sql = sql_copy,file = csv_file)
+		
+			sql_h = sql.SQL("""
+			select * from "sch_chameleon".{};
+			""").format(sql.Identifier(log_table))
+			self.pgsql_cur.execute(sql_h)
+			print("tuple in log_table\n",self.pgsql_cur.fetchall())
+		
 		except psycopg2.Error as e:
 			self.logger.error("SQLCODE: %s SQLERROR: %s" % (e.pgcode, e.pgerror))
 			self.logger.error("fallback to inserts")
@@ -2841,7 +2935,7 @@ class pg_engine(object):
 			
 			:param group_insert: the event data built in mysql_engine
 		"""
-		
+		print(">>>>in insert_batch")
 		self.logger.debug("starting insert loop")
 		for row_data in group_insert:
 			global_data = row_data["global_data"]
@@ -2981,7 +3075,6 @@ class pg_engine(object):
 		
 		for composite_statement in composite_ddl:
 			self.pgsql_cur.execute(composite_statement)
-
 		self.pgsql_cur.execute(table_ddl)
 	
 	def update_schema_mappings(self):
@@ -3180,24 +3273,25 @@ class pg_engine(object):
 		self.pgsql_cur.execute(sql_log_tables, (self.i_id_source, ))
 		log_tables = self.pgsql_cur.fetchall()
 		for log_table in log_tables:
-
-			sql_cleanup = sql.SQL("""
-				DELETE FROM sch_chameleon.{}
-				WHERE 
-					i_id_batch IN (
-						SELECT 
-							i_id_batch 
-						FROM 
-							sch_chameleon.t_replica_batch 
-						WHERE 
-								i_id_source=%s 
-							AND	NOT b_processed
-						)
-				;
-			""").format(sql.Identifier(log_table[0]))
-			self.logger.debug("Cleaning table %s" % log_table[0])
-			self.pgsql_cur.execute(sql_cleanup, (self.i_id_source, ))
-			
+			if log_table[0]:
+				sql_cleanup = sql.SQL("""
+					DELETE FROM sch_chameleon.{}
+					WHERE 
+						i_id_batch IN (
+							SELECT 
+								i_id_batch 
+							FROM 
+								sch_chameleon.t_replica_batch 
+							WHERE 
+									i_id_source=%s 
+								AND	NOT b_processed
+							)
+					;
+				""").format(sql.Identifier(str(log_table[0])))
+				print("log_table", log_table)
+				self.logger.debug("Cleaning table %s" % log_table[0])
+				self.pgsql_cur.execute(sql_cleanup, (self.i_id_source, ))
+				
 
 	def check_auto_maintenance(self):
 		"""
@@ -3401,6 +3495,7 @@ class pg_engine(object):
 			self.logger.debug("Binlog position:%s" % (binlog_position, ))
 			self.logger.debug("Last event: %s" % (db_event_time, ))
 			self.logger.debug("Next log table name: %s" % ( log_table, ))
+			#self.tt_log_table = log_table
 			
 		except psycopg2.Error as e:
 					self.logger.error("SQLCODE: %s SQLERROR: %s" % (e.pgcode, e.pgerror))
@@ -3438,21 +3533,11 @@ class pg_engine(object):
 			sql_insert = """ 
 				INSERT INTO sch_chameleon.t_replica_tables 
 					(
-						i_id_source,
-						v_table_name,
-						v_schema_name,
-						v_table_pkey,
-						t_binlog_name,
-						i_binlog_position
+						i_id_source, v_table_name, v_schema_name, v_table_pkey, t_binlog_name, i_binlog_position
 					)
 				VALUES 
 					(
-						%s,
-						%s,
-						%s,
-						%s,
-						%s,
-						%s
+						%s, %s, %s, %s, %s, %s
 					)
 				ON CONFLICT (i_id_source,v_table_name,v_schema_name)
 					DO UPDATE 
@@ -3463,18 +3548,59 @@ class pg_engine(object):
 							b_replica_enabled = True
 				;
 							"""
-			self.pgsql_cur.execute(sql_insert, (
+
+			sql_insert_h = """
+				DO $$
+				BEGIN
+					UPDATE sch_chameleon.t_replica_tables
+					SET v_table_pkey=%s,
+						t_binlog_name = %s,
+						i_binlog_position = %s,
+						b_replica_enabled = True
+					WHERE i_id_source = %s or v_table_name = %s or  v_schema_name = %s;
+					if not found then
+						INSERT INTO  sch_chameleon.t_replica_tables
+						(i_id_source, v_table_name, v_schema_name, v_table_pkey, t_binlog_name, i_binlog_position)
+						VALUES (%s, %s, %s, %s, %s, %s);
+					end if;
+					exception when others then
+						UPDATE sch_chameleon.t_replica_tables
+						SET v_table_pkey= %s,
+							t_binlog_name = %s,
+							i_binlog_position = %s,
+							b_replica_enabled = True
+						WHERE i_id_source = %s or v_table_name = %s or  v_schema_name = %s;
+				END $$ LANGUAGE plpgsql ;
+			"""
+			self.pgsql_cur.execute(sql_insert_h, (
+				table_pkey, 
+				binlog_file, 
+				binlog_pos,
+				self.i_id_source, 
+				table, 
+				schema, 
 				self.i_id_source, 
 				table, 
 				schema, 
 				table_pkey, 
 				binlog_file, 
-				binlog_pos
+				binlog_pos,
+				table_pkey, 
+				binlog_file, 
+				binlog_pos,
+				self.i_id_source, 
+				table, 
+				schema
 				)
 			)
 		else:
 			self.logger.warning("Missing primary key. The table %s.%s will not be replicated." % (schema, table,))
 			self.unregister_table(schema,  table)
+		t_replica_table_re = """
+		select * from sch_chameleon.t_replica_tables;
+		"""
+		self.pgsql_cur.execute(t_replica_table_re)
+		replica_table_con = self.pgsql_cur.fetchall()
 
 	
 	def copy_data(self, csv_file, schema, table, column_list):
@@ -3491,7 +3617,123 @@ class pg_engine(object):
 		"""
 		sql_copy='COPY "%s"."%s" (%s) FROM STDIN WITH NULL \'NULL\' CSV QUOTE \'"\' DELIMITER \',\' ESCAPE \'"\' ; ' % (schema, table, column_list)		
 		self.pgsql_cur.copy_expert(sql_copy,csv_file)
+
+
+	def copy_data_gpss(self, csv_data, schema, table, column_list):
+		'''
+			copy data into postgresql using gpss
+
+			:param csv_data: csv data path 
+			:param schema: the schema used in the COPY FROM command
+			:param table: the table name used in the COPY FROM command
+			:param column_list: A string with the list of columns to use in the COPY FROM command already quoted and comma separated
+		'''
+		columns = column_list.split("\",\"")   #column_list is a list like string(deleminated by "," and has a "" on each column name)
+		columns[0] = columns[0][1:]
+		columns[-1] = columns[-1][ :-1]
 		
+		csv_df = pd.read_csv(csv_data, sep=',', index_col=False, header=None)
+		insOpt = gpss_pb2.InsertOption(
+			InsertColumns=columns,  # colum list to be inserted
+			TruncateTable=False,  # truncate the table before inserting or not
+			ErrorLimitCount= self.gpss_conf["ErrorLimitCount"],            #
+			ErrorLimitPercentage= self.gpss_conf["ErrorLimitPercentage"],
+		)
+		openReq = gpss_pb2.OpenRequest(Session=self.gpss_session,
+									SchemaName=schema,
+									TableName=table,
+									PreSQL="",
+									PostSQL="",
+									Timeout=10,       # seconds
+									Encoding="UTF_8",
+									StagingSchema="",
+									InsertOption=insOpt)
+		self.gpss_stub.Open(openReq)
+		myRowData = []
+		for index, line in csv_df.iterrows():
+			colData = []
+			for item in line:
+				colData.append(data_pb2.DBValue(StringValue=str(item).encode()))   #greenplum can recognize data typr automatically so take all items as string 
+			myRow = data_pb2.Row(Columns=colData)
+			myRowinBytes = myRow.SerializeToString()
+			myRowData.append(gpss_pb2.RowData(Data=myRowinBytes))
+			if index % self.gpss_conf["writeEvery"] == 0:   ##grpc max message length 4M
+				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+				self.gpss_stub.Write(writeReq)
+				myRowData = []
+
+		if myRowData :
+			writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+			self.gpss_stub.Write(writeReq)
+
+		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
+                                     MaxErrorRows=self.gpss_conf["MaxErrorRows"])
+		self.logger.debug("write to gpss finished")
+		state = self.gpss_stub.Close(closeReq)
+
+	def insert_data_gpss(self, schema, table, insert_data , column_list):
+		"""
+			use gpss to insert
+			The method is a fallback procedure for when the copy method fails.
+			The procedure performs a row by row insert, very slow but capable to skip the rows with problematic data (e.g. encoding issues).	
+
+			:param schema: the schema name where table belongs
+			:param table: the table name where the data should be inserted
+			:param insert_data: a list of records extracted from the database using the unbuffered cursor
+			:param column_list: the list of column names quoted  for the inserts
+		"""
+		print(">>>>in insert_data_gpss")
+		columns = column_list.split("\",\"")   #column_list is a list like string(deleminated by "," and has a "" on each column name)
+		columns[0] = columns[0][1:]
+		columns[-1] = columns[-1][ :-1]
+
+		self.connectToGpss()
+
+		insOpt = gpss_pb2.InsertOption(
+			InsertColumns=columns,  # colum list to be inserted
+			TruncateTable=False,  # truncate the table before inserting or not
+			ErrorLimitCount= self.gpss_conf["ErrorLimitCount"],            #
+			ErrorLimitPercentage= self.gpss_conf["ErrorLimitPercentage"],
+		)
+
+		openReq = gpss_pb2.OpenRequest(Session=self.gpss_session,
+									SchemaName=schema,
+									TableName=table,
+									PreSQL="",
+									PostSQL="",
+									Timeout=10,       # seconds
+									Encoding="UTF_8",
+									StagingSchema="",
+									InsertOption=insOpt)
+		self.gpss_stub.Open(openReq)
+		myRowData = []
+		index = 0
+		for line in insert_data:
+			colData = []
+			index += 1
+			for item in line:
+				colData.append(data_pb2.DBValue(StringValue=str(item).encode()))   #greenplum can recognize data typr automatically so take items as string all
+			myRow = data_pb2.Row(Columns=colData)
+			myRowinBytes = myRow.SerializeToString()
+			myRowData.append(gpss_pb2.RowData(Data=myRowinBytes))
+
+			if index % self.gpss_conf["writeEvery"] == 0:   # grpc max message length 4M restriction
+				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+				self.gpss_stub.Write(writeReq)
+				myRowData = []
+
+		if myRowData :
+			writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+			self.gpss_stub.Write(writeReq)
+
+		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
+                                     MaxErrorRows=self.gpss_conf["MaxErrorRows"])
+
+		self.logger.debug("write to gpss finished")
+		state = self.gpss_stub.Close(closeReq)
+
+
+
 	def insert_data(self, schema, table, insert_data , column_list):
 		"""
 			The method is a fallback procedure for when the copy method fails.
@@ -3502,6 +3744,7 @@ class pg_engine(object):
 			:param insert_data: a list of records extracted from the database using the unbuffered cursor
 			:param column_list: the list of column names quoted  for the inserts
 		"""
+		#pdb.set_trace()
 		sample_row = insert_data[0]
 		column_marker=','.join(['%s' for column in sample_row])
 		
@@ -3547,13 +3790,15 @@ class pg_engine(object):
 		table_primary = []
 		for index in index_data:
 				table_timestamp = str(int(time.time()))
-				indx = index["index_name"]
+				indx = index["INDEX_NAME"]
 				self.logger.debug("Building DDL for index %s" % (indx))
 				idx_col = [column.strip() for column in index["index_columns"].split(',')]
 				index_columns = ['"%s"' % column.strip() for column in idx_col]
-				non_unique = index["non_unique"]
+				non_unique = index["NON_UNIQUE"]
 				if indx =='PRIMARY':
 					pkey_name = "pk_%s_%s_%s " % (table[0:10],table_timestamp,  self.idx_sequence)
+					alt_distri_sql = 'ALTER TABLE "%s"."%s" SET DISTRIBUTED BY (%s);' % (schema, table, ','.join(index_columns))
+					self.pgsql_cur.execute(alt_distri_sql)
 					pkey_def = 'ALTER TABLE "%s"."%s" ADD CONSTRAINT "%s" PRIMARY KEY (%s) ;' % (schema, table, pkey_name, ','.join(index_columns))
 					idx_ddl[pkey_name] = pkey_def
 					table_primary = idx_col
@@ -3606,6 +3851,8 @@ class pg_engine(object):
 			
 			:param id_batch: the id batch to set as processed
 		"""
+
+		print(">>>>>in set bach_processed")
 		self.logger.debug("updating batch %s to processed" % (id_batch, ))
 		sql_update=""" 
 			UPDATE sch_chameleon.t_replica_batch
@@ -3643,7 +3890,17 @@ class pg_engine(object):
 					i_id_batch
 			;
 		"""
-		self.pgsql_cur.execute(sql_collect_events, (id_batch, ))
+		try:
+			self.pgsql_cur.execute(sql_collect_events, ( id_batch, ))
+		except Exception as e:
+			print("meet error", e ,"when set bach_processed")
+		sql_t_batch_events= sql.SQL("""
+		select * from sch_chameleon.t_batch_events;
+		""")
+		self.pgsql_cur.execute(sql_t_batch_events)
+		t_batch_events = self.pgsql_cur.fetchall()
+		print("set batch events result: ", t_batch_events)
+		print("set bach_processed finished")
 	
 	
 	def __swap_enums(self):

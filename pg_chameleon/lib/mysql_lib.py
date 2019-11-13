@@ -10,6 +10,14 @@ from pymysqlreplication.row_event import DeleteRowsEvent,UpdateRowsEvent,WriteRo
 from pymysqlreplication.event import RotateEvent
 from pg_chameleon import sql_token
 from os import remove
+import pdb
+
+from ..gpss import data_pb2
+from ..gpss import data_pb2_grpc
+from ..gpss import gpss_pb2
+from ..gpss import gpss_pb2_grpc
+import grpc
+import google.protobuf
 
 class mysql_source(object):
 	def __init__(self):
@@ -258,7 +266,7 @@ class mysql_source(object):
 		"""
 		for schema in self.schema_list:
 			self.cursor_buffered.execute(sql_tables, (schema))
-			table_list = [table["table_name"] for table in self.cursor_buffered.fetchall()]
+			table_list = [table["TABLE_NAME"] for table in self.cursor_buffered.fetchall()]
 			try:
 				limit_tables = self.limit_tables[schema]
 				if len(limit_tables) > 0:
@@ -387,10 +395,13 @@ class mysql_source(object):
 			The method creates the destination tables in the loading schema.
 			The tables names are looped using the values stored in the class dictionary schema_tables.
 		"""
+
 		for schema in self.schema_tables:
 			table_list = self.schema_tables[schema]
+			print(table_list)
 			for table in table_list:
 				table_metadata = self.get_table_metadata(table, schema)
+				print(">>>going to create table")
 				self.pg_engine.create_table(table_metadata, table, schema, 'mysql')
 	
 	
@@ -458,7 +469,7 @@ class mysql_source(object):
 		select_data = self.cursor_buffered.fetchall()
 		select_csv = ["COALESCE(REPLACE(%s, '\"', '\"\"'),'NULL') " % statement["select_csv"] for statement in select_data]
 		select_stat = [statement["select_csv"] for statement in select_data]
-		column_list = ['"%s"' % statement["column_name"] for statement in select_data]
+		column_list = ['"%s"' % statement["COLUMN_NAME"] for statement in select_data]
 		select_columns["select_csv"] = "REPLACE(CONCAT('\"',CONCAT_WS('\",\"',%s),'\"'),'\"NULL\"','NULL')" % ','.join(select_csv)
 		select_columns["select_stat"]  = ','.join(select_stat)
 		select_columns["column_list"]  = ','.join(column_list)
@@ -502,6 +513,7 @@ class mysql_source(object):
 			:return: the log coordinates for the given table
 			:rtype: dictionary
 		"""
+		print(">>>in mysql:copy_data")
 		slice_insert = []
 		loading_schema = self.schema_loading[schema]["loading"]
 		self.connect_db_buffered()
@@ -528,7 +540,7 @@ class mysql_source(object):
 		sql_rows = sql_rows.format(self.copy_max_memory)
 		self.cursor_buffered.execute(sql_rows, (schema, table))
 		count_rows = self.cursor_buffered.fetchone()
-		total_rows = count_rows["table_rows"]
+		total_rows = count_rows["TABLE_ROWS"]
 		copy_limit = int(count_rows["copy_limit"])
 		if copy_limit == 0:
 			copy_limit = 1000000
@@ -548,6 +560,7 @@ class mysql_source(object):
 		self.logger.debug("Executing query for table %s.%s"  % (schema, table ))
 		self.connect_db_unbuffered()
 		self.cursor_unbuffered.execute(sql_csv)
+
 		while True:
 			csv_results = self.cursor_unbuffered.fetchmany(copy_limit)
 			if len(csv_results) == 0:
@@ -563,19 +576,33 @@ class mysql_source(object):
 				csv_file = codecs.open(out_file, 'wb', self.charset)
 				csv_file.write(csv_data)
 				csv_file.close()
-				csv_file = open(out_file, 'rb')
 			try:
-				self.pg_engine.copy_data(csv_file, loading_schema, table, column_list)
-			except:
-				self.logger.info("Table %s.%s error in PostgreSQL copy, saving slice number for the fallback to insert statements " %  (loading_schema, table ))
+				if self.pg_engine.dest_conn["use_gpss"] == True :
+					if self.copy_mode == 'direct':
+						csv_file = codecs.open(out_file, 'wb', self.charset)
+						csv_file.write(csv_data)
+						csv_file.close()
+					self.pg_engine.copy_data_gpss( out_file, loading_schema, table, column_list)				
+				else:
+					if self.copy_mode == 'file':
+						csv_file = open(out_file, 'rb')
+					self.pg_engine.copy_data(csv_file, loading_schema, table, column_list)
+					csv_file.close()
+			except :
+				self.logger.info("Table %s.%s error in Greenplum copy, saving slice number for the fallback to insert statements " %  (loading_schema, table ))
 				slice_insert.append(slice)
-				
+
+
 			self.print_progress(slice+1,total_slices, schema, table)
 			slice+=1
 
-			csv_file.close()
 		self.cursor_unbuffered.close()
 		self.disconnect_db_unbuffered()
+		if self.pg_engine.dest_conn["use_gpss"] == True :
+			self.pg_engine.gpss_stub.Disconnect(self.pg_engine.gpss_session)
+			self.pg_engine.gpss_channel.close()
+			self.logger.debug("Disconnect gpss session")
+
 		if len(slice_insert)>0:
 			ins_arg={}
 			ins_arg["slice_insert"] = slice_insert
@@ -585,8 +612,9 @@ class mysql_source(object):
 			ins_arg["column_list"] = column_list
 			ins_arg["copy_limit"] = copy_limit
 			self.insert_table_data(ins_arg)
+
 		
-		
+
 		self.logger.debug("unlocking the table %s.%s" % (schema, table) )
 		sql_unlock = "UNLOCK TABLES;" 
 		self.cursor_buffered.execute(sql_unlock)
@@ -597,6 +625,7 @@ class mysql_source(object):
 		except:
 			pass
 		return master_status
+
 	
 	def insert_table_data(self, ins_arg):
 		"""
@@ -608,6 +637,7 @@ class mysql_source(object):
 			:param pg_engine: the postgresql engine
 			:param ins_arg: the list with the insert arguments (slice_insert, schema, table, select_stat,column_list, copy_limit)
 		"""
+		print(">>>in mysql::insert_table_data")
 		slice_insert= ins_arg["slice_insert"]
 		table = ins_arg["table"]
 		schema = ins_arg["schema"]
@@ -617,16 +647,21 @@ class mysql_source(object):
 		self.connect_db_unbuffered()
 		loading_schema = self.schema_loading[schema]["loading"]
 		num_insert = 1
+
 		for slice in slice_insert:
 			self.logger.info("Executing inserts in %s.%s. Slice %s. Rows per slice %s." %  (loading_schema, table, num_insert, copy_limit ,   ))
 			offset = slice*copy_limit
 			sql_fallback = "SELECT %s FROM `%s`.`%s` LIMIT %s, %s;" % (select_stat, schema, table, offset, copy_limit)
 			self.cursor_unbuffered.execute(sql_fallback)
 			insert_data =  self.cursor_unbuffered.fetchall()
-			self.pg_engine.insert_data(loading_schema, table, insert_data , column_list)
+			if  self.pg_engine.dest_conn["use_gpss"] == True :
+				self.pg_engine.insert_data_gpss(loading_schema, table, insert_data , column_list)
+			else:
+				self.pg_engine.insert_data(loading_schema, table, insert_data , column_list)
 			num_insert +=1
+
 		self.disconnect_db_unbuffered()
-		
+
 	
 	def print_progress (self, iteration, total, schema, table):
 		"""
@@ -696,6 +731,7 @@ class mysql_source(object):
 			for table in table_list:
 				self.logger.info("Copying the source table %s into %s.%s" %(table, loading_schema, table) )
 				try:
+					print(">>>>>in mysql:__copy_tables")
 					master_status = self.copy_data(schema, table)
 					table_pkey = self.__create_indices(schema, table)
 					self.pg_engine.store_table(destination_schema, table, table_pkey, master_status)
@@ -744,13 +780,14 @@ class mysql_source(object):
 		self.replica_batch_size = self.source_config["replica_batch_size"]
 		self.sleep_loop = self.source_config["sleep_loop"]
 		self.hexify = [] + self.hexify_always
+		skip = ""
 		try:
 			self.connect_db_buffered()
 		except:
 			if exit_on_error:
 				raise
 			else: 
-				return "skip"
+				skip = "skip"
 		self.pg_engine.connect_db()
 		self.schema_mappings = self.pg_engine.get_schema_mappings()
 		self.schema_replica = [schema for schema in self.schema_mappings]
@@ -765,6 +802,7 @@ class mysql_source(object):
 		if self.gtid_mode:
 			master_data = self.get_master_coordinates()
 			self.start_xid = master_data[0]["Executed_Gtid_Set"].split(':')[1].split('-')[0]
+		return skip
 	
 	def __init_sync(self):
 		"""
@@ -842,8 +880,11 @@ class mysql_source(object):
 			schema for the loaded tables to the destination schema. 
 			The swap happens in a single transaction.
 		"""
+		print(">>>>>in sync tables")
 		self.logger.info("Starting sync tables for source %s" % self.source)
 		self.__init_sync()
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
 		self.__check_mysql_config()
 		self.pg_engine.set_source_status("syncing")
 		if self.tables == 'disabled':
@@ -858,6 +899,7 @@ class mysql_source(object):
 		self.create_destination_schemas()
 		self.pg_engine.schema_loading = self.schema_loading
 		self.pg_engine.schema_tables = self.schema_tables
+		print(">>>createing destination tables")
 		self.create_destination_tables()
 		self.disconnect_db_buffered()
 		self.__copy_tables()
@@ -870,6 +912,7 @@ class mysql_source(object):
 			master_end = self.get_master_coordinates()
 			self.disconnect_db_buffered()
 			self.pg_engine.set_source_highwatermark(master_end, consistent=False)
+			print(">>>>in cleanup_table_events")
 			self.pg_engine.cleanup_table_events()
 			notifier_message = "the sync for tables %s in source %s is complete" % (self.tables, self.source)
 			self.notifier.send_message(notifier_message, 'info')
@@ -921,11 +964,11 @@ class mysql_source(object):
 						ordinal_position
 					;
 				"""
-				self.cursor_buffered.execute(sql_columns, (table["table_schema"], table["table_name"]))
+				self.cursor_buffered.execute(sql_columns, (table["TABLE_SCHEMA"], table["TABLE_NAME"]))
 				column_data = self.cursor_buffered.fetchall()
 				for column in column_data:
-					column_type[column["column_name"]] = column["data_type"]
-				table_map[table["table_name"]] = column_type
+					column_type[column["COLUMN_NAME"]] = column["DATA_TYPE"]
+				table_map[table["TABLE_NAME"]] = column_type
 			table_type_map[schema] = table_map
 			table_map = {}
 		return table_type_map
@@ -1063,6 +1106,8 @@ class mysql_source(object):
 		:return: the batch's data composed by binlog name, binlog position and last event timestamp read from the mysql replica stream.
 		:rtype: dictionary
 		"""
+
+		print(">>>> in mysql::__read_replica_stream")
 		size_insert=0
 		sql_tokeniser = sql_token()
 		table_type_map = self.get_table_type_map()	
@@ -1105,6 +1150,8 @@ class mysql_source(object):
 			self.logger.debug("GTID DISABLED - log_file %s, log_position %s. id_batch: %s " % (log_file, log_position, id_batch))
 		
 		for binlogevent in my_stream:
+			print(binlogevent)
+
 			if isinstance(binlogevent, GtidEvent):
 				if close_batch:
 					break
@@ -1136,12 +1183,16 @@ class mysql_source(object):
 					break
 			
 			elif isinstance(binlogevent, QueryEvent):
+				print("find queryevent in binlog..")
 				event_time = binlogevent.timestamp
 				try:
 					schema_query = binlogevent.schema.decode()
 				except:
-					schema_query = binlogevent.schema
+					schema_query = binlogevent.schema_list
 				
+				print(binlogevent.query.strip().upper())
+				print("skip statement: ", self.statement_skip)
+				print(schema_query)
 				if binlogevent.query.strip().upper() not in self.statement_skip and schema_query in self.schema_mappings: 
 					close_batch=True
 					destination_schema = self.schema_mappings[schema_query]
@@ -1150,12 +1201,16 @@ class mysql_source(object):
 					master_data["Position"] = log_position
 					master_data["Time"] = event_time
 					master_data["gtid"] = next_gtid
+					print("len(group_insert): ", len(group_insert))
 					if len(group_insert)>0:
+						
+						print("going to write batch..")
 						self.pg_engine.write_batch(group_insert)
 						group_insert=[]
 					self.logger.info("QUERY EVENT - binlogfile %s, position %s.\n--------\n%s\n-------- " % (binlogfile, log_position, binlogevent.query))
 					sql_tokeniser.parse_sql(binlogevent.query)
 					for token in sql_tokeniser.tokenised:
+						print(token)
 						write_ddl = True
 						table_name = token["name"] 
 						store_query = self.__store_binlog_event(table_name, schema_query)
@@ -1174,6 +1229,7 @@ class mysql_source(object):
 									self.logger.info("CONSISTENT POINT FOR TABLE %s REACHED  - binlogfile %s, position %s" % (table_key_dic, binlogfile, log_position))
 									self.pg_engine.set_consistent_table(table_name, destination_schema)
 									inc_tables = self.pg_engine.get_inconsistent_tables()
+							print("wether write_ddl: ", write_ddl)
 							if write_ddl:
 								event_time = binlogevent.timestamp
 								self.logger.debug("TOKEN: %s" % (token))
@@ -1186,6 +1242,7 @@ class mysql_source(object):
 										"batch_id":id_batch, 
 										"log_table":log_table
 									}
+									print("writting ddl, log_table: ", log_table)
 									self.pg_engine.write_ddl(token, query_data, destination_schema)
 								
 							
@@ -1194,10 +1251,11 @@ class mysql_source(object):
 				if close_batch:
 					my_stream.close()
 					return [master_data, close_batch]
-			else:
+			
+			else:   ##need to do sth in gp...
 				
 				for row in binlogevent.rows:
-					#print(row["values"])
+					print( "row values: ",row["values"])
 					event_after={}
 					event_before={}
 					event_insert = {}
@@ -1336,6 +1394,9 @@ class mysql_source(object):
 					replica_data=self.__read_replica_stream(batch_data)
 					master_data=replica_data[0]
 					close_batch=replica_data[1]
+					print(">>>in mysql read_replica")
+					print("master_data", master_data)
+					print("close_batch", close_batch)
 					if "gtid" in master_data:
 						master_data["Executed_Gtid_Set"] = self.__build_gtid_set(master_data["gtid"])
 					else:
@@ -1350,6 +1411,7 @@ class mysql_source(object):
 						else:
 							self.logger.debug("batch not saved. using old id_batch %s" % (self.id_batch))
 						if self.id_batch:
+							print("going to set bach_processed")
 							self.logger.debug("updating processed flag for id_batch %s", (id_batch))
 							self.pg_engine.set_batch_processed(id_batch)
 							self.id_batch=None
@@ -1365,6 +1427,8 @@ class mysql_source(object):
 		"""
 		self.logger.debug("starting init replica for source %s" % self.source)
 		self.__init_sync()
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
 		self.__check_mysql_config()
 		master_start = self.get_master_coordinates()
 		self.pg_engine.set_source_status("initialising")
