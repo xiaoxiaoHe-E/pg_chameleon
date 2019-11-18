@@ -15,6 +15,7 @@ import datetime
 import pandas as pd
 
 import pdb
+import inspect
 
 from ..gpss import data_pb2
 from ..gpss import data_pb2_grpc
@@ -527,7 +528,7 @@ class pgsql_source(object):
 		self.logger.debug("starting init replica for source %s" % self.source)
 		self.__init_sync()
 		if self.dest_conn["use_gpss"] == True:
-			self.pg_engine.connectToGpss()
+			self.connectToGpss()
 		self.schema_list = [schema for schema in self.schema_mappings]
 		self.__build_table_exceptions()
 		self.__get_table_list()
@@ -677,10 +678,10 @@ class pg_engine(object):
 
 	def disConnectGpss(self):
 		#disconnect from gpss to free sources to move on
+
 		self.logger.debug("disconnecting to gpss")
 		self.gpss_stub.Disconnect(self.gpss_session)
 		self.gpss_channel.close()
-		self.logger.debug("Disconnect gpss session")
 
 	def disconnect_db(self):
 		"""
@@ -1957,7 +1958,6 @@ class pg_engine(object):
 			:param query_data: query's metadata (schema,binlog, etc.)
 			:param destination_schema: the postgresql destination schema determined using the schema mappings.
 		"""
-		print(">>in write_ddl (insert log_table)")
 		pg_ddl = self.__generate_ddl(token, destination_schema)
 		self.logger.debug("Translated query: %s " % (pg_ddl,))
 		log_table = query_data["log_table"]
@@ -1992,8 +1992,6 @@ class pg_engine(object):
 				)
 			;
 		""").format(sql.Identifier(log_table), )
-
-		print(log_table)
 		
 		self.pgsql_cur.execute(sql_insert, insert_vals)
 	
@@ -2904,10 +2902,11 @@ class pg_engine(object):
 		if myRowData :
 			writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
 			self.gpss_stub.Write(writeReq)
+
 		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
                                      MaxErrorRows=self.gpss_conf["MaxErrorRows"])
 		state = self.gpss_stub.Close(closeReq)
-
+		
 		if state.ErrorCount != 0:
 			self.logger.debug("gpss error encountered")
 			for e in state.ErrorRows:
@@ -2917,7 +2916,7 @@ class pg_engine(object):
 
 		else:
 			self.logger.debug("write batch by gpss finished")
-
+		
 		
 	def write_batch(self, group_insert):
 		"""
@@ -3348,7 +3347,6 @@ class pg_engine(object):
 							)
 					;
 				""").format(sql.Identifier(str(log_table[0])))
-				print("log_table", log_table)
 				self.logger.debug("Cleaning table %s" % log_table[0])
 				self.pgsql_cur.execute(sql_cleanup, (self.i_id_source, ))
 				

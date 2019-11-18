@@ -400,7 +400,6 @@ class mysql_source(object):
 			table_list = self.schema_tables[schema]
 			for table in table_list:
 				table_metadata = self.get_table_metadata(table, schema)
-				print(">>>going to create table")
 				self.pg_engine.create_table(table_metadata, table, schema, 'mysql')
 	
 	
@@ -512,7 +511,6 @@ class mysql_source(object):
 			:return: the log coordinates for the given table
 			:rtype: dictionary
 		"""
-		print(">>>in mysql:copy_data")
 		slice_insert = []
 		loading_schema = self.schema_loading[schema]["loading"]
 		self.connect_db_buffered()
@@ -634,7 +632,6 @@ class mysql_source(object):
 			:param pg_engine: the postgresql engine
 			:param ins_arg: the list with the insert arguments (slice_insert, schema, table, select_stat,column_list, copy_limit)
 		"""
-		print(">>>in mysql::insert_table_data")
 		slice_insert= ins_arg["slice_insert"]
 		table = ins_arg["table"]
 		schema = ins_arg["schema"]
@@ -880,7 +877,6 @@ class mysql_source(object):
 			schema for the loaded tables to the destination schema. 
 			The swap happens in a single transaction.
 		"""
-		print(">>>>>in sync tables")
 		self.logger.info("Starting sync tables for source %s" % self.source)
 		self.__init_sync()
 		self.__check_mysql_config()
@@ -897,7 +893,6 @@ class mysql_source(object):
 		self.create_destination_schemas()
 		self.pg_engine.schema_loading = self.schema_loading
 		self.pg_engine.schema_tables = self.schema_tables
-		print(">>>createing destination tables")
 		self.create_destination_tables()
 		self.disconnect_db_buffered()
 		self.__copy_tables()
@@ -910,7 +905,6 @@ class mysql_source(object):
 			master_end = self.get_master_coordinates()
 			self.disconnect_db_buffered()
 			self.pg_engine.set_source_highwatermark(master_end, consistent=False)
-			print(">>>>in cleanup_table_events")
 			self.pg_engine.cleanup_table_events()
 			notifier_message = "the sync for tables %s in source %s is complete" % (self.tables, self.source)
 			self.notifier.send_message(notifier_message, 'info')
@@ -1146,8 +1140,8 @@ class mysql_source(object):
 		else:
 			self.logger.debug("GTID DISABLED - log_file %s, log_position %s. id_batch: %s " % (log_file, log_position, id_batch))
 		
-		if self.pg_engine.dest_conn["use_gpss"] == True:
-			self.pg_engine.connectToGpss()
+		#if self.pg_engine.dest_conn["use_gpss"] == True:
+		#	self.pg_engine.connectToGpss()
 		
 		for binlogevent in my_stream:
 			if isinstance(binlogevent, GtidEvent):
@@ -1201,7 +1195,6 @@ class mysql_source(object):
 					self.logger.info("QUERY EVENT - binlogfile %s, position %s.\n--------\n%s\n-------- " % (binlogfile, log_position, binlogevent.query))
 					sql_tokeniser.parse_sql(binlogevent.query)
 					for token in sql_tokeniser.tokenised:
-						print(token)
 						write_ddl = True
 						table_name = token["name"] 
 						store_query = self.__store_binlog_event(table_name, schema_query)
@@ -1233,7 +1226,6 @@ class mysql_source(object):
 										"batch_id":id_batch, 
 										"log_table":log_table
 									}
-									print("writting ddl, log_table: ", log_table)
 									self.pg_engine.write_ddl(token, query_data, destination_schema)
 								
 							
@@ -1351,7 +1343,10 @@ class mysql_source(object):
 		my_stream.close()
 		if len(group_insert)>0:
 			self.logger.debug("writing the last %s events" % (len(group_insert), ))
-			self.pg_engine.write_batch(group_insert)
+			if self.pg_engine.dest_conn["use_gpss"] == True:
+				self.pg_engine.write_batch_gpss(group_insert)
+			else:
+				self.pg_engine.write_batch(group_insert)
 			close_batch=True
 
 		

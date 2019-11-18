@@ -487,14 +487,16 @@ class replica_engine(object):
 		
 		self.mysql_source.logger  = log_read[0]
 		self.pg_engine.logger  = log_read[0]
+
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
+
 		while True:
 			try:
 				self.mysql_source.read_replica()
 				time.sleep(self.sleep_loop)
 			except Exception:
 				queue.put(traceback.format_exc())
-				if self.pg_engine.dest_conn["use_gpss"] == True:
-					self.pg_engine.disConnectGpss()
 				break
 	
 	def replay_replica(self, queue, log_replay):
@@ -527,7 +529,6 @@ class replica_engine(object):
 			destination.
 		"""
 
-		print(">>>>__run_replica")
 		if "auto_maintenance" not in  self.config["sources"][self.args.source]:
 			auto_maintenance = "disabled" 
 		else:
@@ -557,7 +558,6 @@ class replica_engine(object):
 		self.replay_daemon = mp.Process(target=self.replay_replica, name='replay_replica', daemon=True, args=(queue, log_replay,))
 		self.read_daemon.start()
 		self.replay_daemon.start()
-		print("read and reply started")
 
 		while True:
 			read_alive = self.read_daemon.is_alive()
@@ -594,10 +594,13 @@ class replica_engine(object):
 				self.pg_engine.connect_db()
 				run_maintenance = self.pg_engine.check_auto_maintenance()
 				self.pg_engine.disconnect_db()
+				if self.pg_engine.dest_conn["use_gpss"] == True:
+					self.pg_engine.disConnectGpss()
 				if run_maintenance:
 					self.pg_engine.run_maintenance()
 				
-
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.disConnectGpss()
 			
 		self.logger.info("Replica process for source %s ended" % (self.args.source))
 	
@@ -656,7 +659,6 @@ class replica_engine(object):
 				file_pid=open(replica_pid,'r')
 				pid=file_pid.read()
 				file_pid.close()
-				print("file_pid",file_pid)
 				if pid is not None:
 					os.kill(int(pid),2)
 					print("Requesting the replica for source %s to stop" % (self.source))
