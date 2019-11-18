@@ -650,7 +650,7 @@ class pg_engine(object):
 			self.pgsql_conn = psycopg2.connect(strconn)
 			self.pgsql_conn .set_client_encoding(self.dest_conn["charset"])
 			self.set_autocommit_db(True)
-			self.pgsql_cur = self.pgsql_conn .cursor()
+			self.pgsql_cur = self.pgsql_conn.cursor()
 		elif not self.dest_conn:
 			self.logger.error("Undefined database connection string. Exiting now.")
 			sys.exit()
@@ -675,6 +675,12 @@ class pg_engine(object):
 			self.logger.error("error when connect to gpss")
 			sys.exit()
 
+	def disConnectGpss(self):
+		#disconnect from gpss to free sources to move on
+		self.logger.debug("disconnecting to gpss")
+		self.gpss_stub.Disconnect(self.gpss_session)
+		self.gpss_channel.close()
+		self.logger.debug("Disconnect gpss session")
 
 	def disconnect_db(self):
 		"""
@@ -1199,10 +1205,8 @@ class pg_engine(object):
 			exit_on_error = True if self.source_config["on_error_replay"]=='exit' else False
 			while continue_loop:
 				sql_replay = """SELECT * FROM sch_chameleon.fn_replay_mysql(%s,%s,%s);"""
-				print("fn_replay_mysql args: ", replay_max_rows, self.i_id_source, exit_on_error)
 				self.pgsql_cur.execute(sql_replay, (replay_max_rows, self.i_id_source, exit_on_error))
 				replay_status = self.pgsql_cur.fetchone()
-				print("reply_status: ",replay_status)
 				if replay_status[0]:
 					self.logger.info("Replayed at most %s rows for source %s" % (replay_max_rows, self.source) )
 				replica_paused = self.get_replica_paused()
@@ -1214,7 +1218,6 @@ class pg_engine(object):
 					raise Exception('The replay process crashed')
 				if replay_status[2]:
 					tables_error.append(replay_status[2])
-		print("fn_replay_mysql finished")
 		return tables_error
 			
 	
@@ -2846,6 +2849,74 @@ class pg_engine(object):
 		sql_app_name="""SET application_name=%s; """
 		self.pgsql_cur.execute(sql_app_name, (app_name , ))
 
+	def write_batch_gpss(self, group_insert):
+		self.set_application_name("writing batch through gpss")
+
+		columns = ['i_id_event', 'i_id_batch', 'v_table_name', 'v_schema_name', 
+		'enm_binlog_event', 't_binlog_name', 'i_binlog_position', 'ts_event_datetime',
+		'jsb_event_after', 'jsb_event_before','t_query','i_my_event_time']
+
+		insOpt = gpss_pb2.InsertOption(
+			InsertColumns=columns,  # colum list to be inserted
+			TruncateTable=False,  # truncate the table before inserting or not
+			ErrorLimitCount= self.gpss_conf["ErrorLimitCount"],            #
+			ErrorLimitPercentage= self.gpss_conf["ErrorLimitPercentage"],
+		)
+		logTable = group_insert[0]["global_data"]["log_table"]
+		openReq = gpss_pb2.OpenRequest(Session=self.gpss_session,
+									SchemaName="sch_chameleon",
+									TableName=logTable,
+									PreSQL="",
+									PostSQL="",
+									Timeout=10,       # seconds
+									Encoding="UTF_8",
+									StagingSchema="",
+									InsertOption=insOpt)
+		self.gpss_stub.Open(openReq)
+		
+		index = 0
+		myRowData = []
+		for row_data in group_insert:
+			global_data = row_data["global_data"]
+			event_after = row_data["event_after"]
+			event_before = row_data["event_before"]
+			colData = []
+			colData.append( data_pb2.DBValue(Int64Value= 0) )  #event id , make it 0 as default
+			colData.append( data_pb2.DBValue( Int64Value=int(global_data["batch_id"]) ) )
+			colData.append( data_pb2.DBValue( StringValue=str(global_data["table"])) )
+			colData.append( data_pb2.DBValue( StringValue=str(global_data["schema"])) )
+			colData.append( data_pb2.DBValue( StringValue=str(global_data["action"])) )
+			colData.append( data_pb2.DBValue( StringValue=str(global_data["binlog"])) )
+			colData.append( data_pb2.DBValue( Int64Value=int(global_data["logpos"])) )
+			colData.append(data_pb2.DBValue(StringValue=  datetime.datetime.now().strftime("%m-%d-%Y %H:%M:%S")))  #timestamp
+			colData.append(data_pb2.DBValue(StringValue=json.dumps(event_after, cls=pg_encoder)))
+			colData.append(data_pb2.DBValue(StringValue=json.dumps(event_before, cls=pg_encoder)))
+			colData.append(data_pb2.DBValue(StringValue=''))  #t_query
+			colData.append(data_pb2.DBValue(Int64Value=int(global_data["event_time"]))) #event_time
+			myRow = data_pb2.Row(Columns=colData)
+			myRowinBytes = gpss_pb2.RowData( Data = myRow.SerializeToString() )
+			myRowData.append(myRowinBytes)
+			if index%self.gpss_conf["writeEvery"] == 0:   ##grpc max message length 4M
+				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+				self.gpss_stub.Write(writeReq)
+				myRowData = []
+
+		if myRowData :
+			writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
+			self.gpss_stub.Write(writeReq)
+		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
+                                     MaxErrorRows=self.gpss_conf["MaxErrorRows"])
+		state = self.gpss_stub.Close(closeReq)
+
+		if state.ErrorCount != 0:
+			self.logger.debug("gpss error encountered")
+			for e in state.ErrorRows:
+				self.logger.debug(e)
+			self.logger.debug("fall into write batch")
+			self.write_batch(group_insert)
+
+		else:
+			self.logger.debug("write batch by gpss finished")
 
 		
 	def write_batch(self, group_insert):
@@ -2860,7 +2931,6 @@ class pg_engine(object):
 			
 			:param group_insert: the event data built in mysql_engine
 		"""
-		print(">>>in wriet_batch")
 		csv_file=io.StringIO()
 		self.set_application_name("writing batch")
 		insert_list=[]
@@ -2868,7 +2938,6 @@ class pg_engine(object):
 		for row_data in group_insert:
 			global_data=row_data["global_data"]
 			event_after=row_data["event_after"]
-			print("event_after", type(event_after), event_after)
 			event_before=row_data["event_before"]
 			log_table=global_data["log_table"]
 			insert_list.append(self.pgsql_cur.mogrify("%s,%s,%s,%s,%s,%s,%s,%s,%s" ,  (
@@ -2884,8 +2953,7 @@ class pg_engine(object):
 						
 					)
 				)
-			)
-											
+			)				
 		csv_data=b"\n".join(insert_list ).decode()
 		csv_file.write(csv_data)
 		csv_file.seek(0)
@@ -2911,14 +2979,7 @@ class pg_engine(object):
 					ESCAPE '''' 
 				;
 			""").format(sql.Identifier(log_table))
-			print("log_table: ", log_table)
 			self.pgsql_cur.copy_expert(sql = sql_copy,file = csv_file)
-		
-			sql_h = sql.SQL("""
-			select * from "sch_chameleon".{};
-			""").format(sql.Identifier(log_table))
-			self.pgsql_cur.execute(sql_h)
-			print("tuple in log_table\n",self.pgsql_cur.fetchall())
 		
 		except psycopg2.Error as e:
 			self.logger.error("SQLCODE: %s SQLERROR: %s" % (e.pgcode, e.pgerror))
@@ -2935,7 +2996,6 @@ class pg_engine(object):
 			
 			:param group_insert: the event data built in mysql_engine
 		"""
-		print(">>>>in insert_batch")
 		self.logger.debug("starting insert loop")
 		for row_data in group_insert:
 			global_data = row_data["global_data"]
@@ -3653,7 +3713,7 @@ class pg_engine(object):
 		for index, line in csv_df.iterrows():
 			colData = []
 			for item in line:
-				colData.append(data_pb2.DBValue(StringValue=str(item).encode()))   #greenplum can recognize data typr automatically so take all items as string 
+				colData.append(data_pb2.DBValue(StringValue=str(item)))   #greenplum can recognize data typr automatically so take all items as string 
 			myRow = data_pb2.Row(Columns=colData)
 			myRowinBytes = myRow.SerializeToString()
 			myRowData.append(gpss_pb2.RowData(Data=myRowinBytes))
@@ -3668,70 +3728,15 @@ class pg_engine(object):
 
 		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
                                      MaxErrorRows=self.gpss_conf["MaxErrorRows"])
-		self.logger.debug("write to gpss finished")
 		state = self.gpss_stub.Close(closeReq)
 
-	def insert_data_gpss(self, schema, table, insert_data , column_list):
-		"""
-			use gpss to insert
-			The method is a fallback procedure for when the copy method fails.
-			The procedure performs a row by row insert, very slow but capable to skip the rows with problematic data (e.g. encoding issues).	
-
-			:param schema: the schema name where table belongs
-			:param table: the table name where the data should be inserted
-			:param insert_data: a list of records extracted from the database using the unbuffered cursor
-			:param column_list: the list of column names quoted  for the inserts
-		"""
-		print(">>>>in insert_data_gpss")
-		columns = column_list.split("\",\"")   #column_list is a list like string(deleminated by "," and has a "" on each column name)
-		columns[0] = columns[0][1:]
-		columns[-1] = columns[-1][ :-1]
-
-		self.connectToGpss()
-
-		insOpt = gpss_pb2.InsertOption(
-			InsertColumns=columns,  # colum list to be inserted
-			TruncateTable=False,  # truncate the table before inserting or not
-			ErrorLimitCount= self.gpss_conf["ErrorLimitCount"],            #
-			ErrorLimitPercentage= self.gpss_conf["ErrorLimitPercentage"],
-		)
-
-		openReq = gpss_pb2.OpenRequest(Session=self.gpss_session,
-									SchemaName=schema,
-									TableName=table,
-									PreSQL="",
-									PostSQL="",
-									Timeout=10,       # seconds
-									Encoding="UTF_8",
-									StagingSchema="",
-									InsertOption=insOpt)
-		self.gpss_stub.Open(openReq)
-		myRowData = []
-		index = 0
-		for line in insert_data:
-			colData = []
-			index += 1
-			for item in line:
-				colData.append(data_pb2.DBValue(StringValue=str(item).encode()))   #greenplum can recognize data typr automatically so take items as string all
-			myRow = data_pb2.Row(Columns=colData)
-			myRowinBytes = myRow.SerializeToString()
-			myRowData.append(gpss_pb2.RowData(Data=myRowinBytes))
-
-			if index % self.gpss_conf["writeEvery"] == 0:   # grpc max message length 4M restriction
-				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
-				self.gpss_stub.Write(writeReq)
-				myRowData = []
-
-		if myRowData :
-			writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
-			self.gpss_stub.Write(writeReq)
-
-		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
-                                     MaxErrorRows=self.gpss_conf["MaxErrorRows"])
-
-		self.logger.debug("write to gpss finished")
-		state = self.gpss_stub.Close(closeReq)
-
+		if state.ErrorCount != 0:
+			self.logger.debug("gpss error encountered, ", state.ErrorCount)
+			self.logger.debug("fall into normal copy_data")
+			csv_file_copy = open(csv_data, 'rb')
+			self.copy_data(csv_file_copy, schema, table, column_list)
+		else:
+			self.logger.debug("copy data by gpss finished")
 
 
 	def insert_data(self, schema, table, insert_data , column_list):
@@ -3744,7 +3749,6 @@ class pg_engine(object):
 			:param insert_data: a list of records extracted from the database using the unbuffered cursor
 			:param column_list: the list of column names quoted  for the inserts
 		"""
-		#pdb.set_trace()
 		sample_row = insert_data[0]
 		column_marker=','.join(['%s' for column in sample_row])
 		
@@ -3852,7 +3856,6 @@ class pg_engine(object):
 			:param id_batch: the id batch to set as processed
 		"""
 
-		print(">>>>>in set bach_processed")
 		self.logger.debug("updating batch %s to processed" % (id_batch, ))
 		sql_update=""" 
 			UPDATE sch_chameleon.t_replica_batch
@@ -3899,8 +3902,6 @@ class pg_engine(object):
 		""")
 		self.pgsql_cur.execute(sql_t_batch_events)
 		t_batch_events = self.pgsql_cur.fetchall()
-		print("set batch events result: ", t_batch_events)
-		print("set bach_processed finished")
 	
 	
 	def __swap_enums(self):
@@ -3977,6 +3978,7 @@ class pg_engine(object):
 			:param schema_name: The schema name to be created. 
 			:param schema_name: If true the schema is dropped with the clause cascade. 
 		"""
+		
 		if cascade:
 			cascade_clause = "CASCADE"
 		else:

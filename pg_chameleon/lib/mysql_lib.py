@@ -398,7 +398,6 @@ class mysql_source(object):
 
 		for schema in self.schema_tables:
 			table_list = self.schema_tables[schema]
-			print(table_list)
 			for table in table_list:
 				table_metadata = self.get_table_metadata(table, schema)
 				print(">>>going to create table")
@@ -599,9 +598,7 @@ class mysql_source(object):
 		self.cursor_unbuffered.close()
 		self.disconnect_db_unbuffered()
 		if self.pg_engine.dest_conn["use_gpss"] == True :
-			self.pg_engine.gpss_stub.Disconnect(self.pg_engine.gpss_session)
-			self.pg_engine.gpss_channel.close()
-			self.logger.debug("Disconnect gpss session")
+			self.pg_engine.disConnectGpss()
 
 		if len(slice_insert)>0:
 			ins_arg={}
@@ -648,19 +645,20 @@ class mysql_source(object):
 		loading_schema = self.schema_loading[schema]["loading"]
 		num_insert = 1
 
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
 		for slice in slice_insert:
 			self.logger.info("Executing inserts in %s.%s. Slice %s. Rows per slice %s." %  (loading_schema, table, num_insert, copy_limit ,   ))
 			offset = slice*copy_limit
 			sql_fallback = "SELECT %s FROM `%s`.`%s` LIMIT %s, %s;" % (select_stat, schema, table, offset, copy_limit)
 			self.cursor_unbuffered.execute(sql_fallback)
 			insert_data =  self.cursor_unbuffered.fetchall()
-			if  self.pg_engine.dest_conn["use_gpss"] == True :
-				self.pg_engine.insert_data_gpss(loading_schema, table, insert_data , column_list)
-			else:
-				self.pg_engine.insert_data(loading_schema, table, insert_data , column_list)
+			self.pg_engine.insert_data(loading_schema, table, insert_data , column_list)
 			num_insert +=1
 
 		self.disconnect_db_unbuffered()
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.disConnectGpss()
 
 	
 	def print_progress (self, iteration, total, schema, table):
@@ -731,7 +729,6 @@ class mysql_source(object):
 			for table in table_list:
 				self.logger.info("Copying the source table %s into %s.%s" %(table, loading_schema, table) )
 				try:
-					print(">>>>>in mysql:__copy_tables")
 					master_status = self.copy_data(schema, table)
 					table_pkey = self.__create_indices(schema, table)
 					self.pg_engine.store_table(destination_schema, table, table_pkey, master_status)
@@ -824,6 +821,9 @@ class mysql_source(object):
 		self.pg_engine.connect_db()
 		self.schema_mappings = self.pg_engine.get_schema_mappings()
 		self.pg_engine.schema_tables = self.schema_tables
+
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
 		
 		
 		
@@ -883,8 +883,6 @@ class mysql_source(object):
 		print(">>>>>in sync tables")
 		self.logger.info("Starting sync tables for source %s" % self.source)
 		self.__init_sync()
-		if self.pg_engine.dest_conn["use_gpss"] == True:
-			self.pg_engine.connectToGpss()
 		self.__check_mysql_config()
 		self.pg_engine.set_source_status("syncing")
 		if self.tables == 'disabled':
@@ -1107,7 +1105,6 @@ class mysql_source(object):
 		:rtype: dictionary
 		"""
 
-		print(">>>> in mysql::__read_replica_stream")
 		size_insert=0
 		sql_tokeniser = sql_token()
 		table_type_map = self.get_table_type_map()	
@@ -1149,9 +1146,10 @@ class mysql_source(object):
 		else:
 			self.logger.debug("GTID DISABLED - log_file %s, log_position %s. id_batch: %s " % (log_file, log_position, id_batch))
 		
+		if self.pg_engine.dest_conn["use_gpss"] == True:
+			self.pg_engine.connectToGpss()
+		
 		for binlogevent in my_stream:
-			print(binlogevent)
-
 			if isinstance(binlogevent, GtidEvent):
 				if close_batch:
 					break
@@ -1183,16 +1181,12 @@ class mysql_source(object):
 					break
 			
 			elif isinstance(binlogevent, QueryEvent):
-				print("find queryevent in binlog..")
 				event_time = binlogevent.timestamp
 				try:
 					schema_query = binlogevent.schema.decode()
 				except:
 					schema_query = binlogevent.schema_list
 				
-				print(binlogevent.query.strip().upper())
-				print("skip statement: ", self.statement_skip)
-				print(schema_query)
 				if binlogevent.query.strip().upper() not in self.statement_skip and schema_query in self.schema_mappings: 
 					close_batch=True
 					destination_schema = self.schema_mappings[schema_query]
@@ -1201,10 +1195,7 @@ class mysql_source(object):
 					master_data["Position"] = log_position
 					master_data["Time"] = event_time
 					master_data["gtid"] = next_gtid
-					print("len(group_insert): ", len(group_insert))
 					if len(group_insert)>0:
-						
-						print("going to write batch..")
 						self.pg_engine.write_batch(group_insert)
 						group_insert=[]
 					self.logger.info("QUERY EVENT - binlogfile %s, position %s.\n--------\n%s\n-------- " % (binlogfile, log_position, binlogevent.query))
@@ -1252,10 +1243,10 @@ class mysql_source(object):
 					my_stream.close()
 					return [master_data, close_batch]
 			
-			else:   ##need to do sth in gp...
+			else:
 				
 				for row in binlogevent.rows:
-					print( "row values: ",row["values"])
+					#print( "row values: ",row["values"])
 					event_after={}
 					event_before={}
 					event_insert = {}
@@ -1318,7 +1309,7 @@ class mysql_source(object):
 								if column_type in self.hexify and event_after[column_name]:
 									event_after[column_name]=binascii.hexlify(event_after[column_name]).decode()
 								elif column_type in self.hexify and isinstance(event_after[column_name], bytes):
-									event_after[column_name] = ''
+									event_after[column_name] = ""
 								elif column_type == 'json':
 									event_after[column_name] = self.__decode_dic_keys(event_after[column_name])
 									
@@ -1331,7 +1322,7 @@ class mysql_source(object):
 								if column_type in self.hexify and event_before[column_name]:
 									event_before[column_name]=binascii.hexlify(event_before[column_name]).decode()
 								elif column_type in self.hexify and isinstance(event_before[column_name], bytes):
-									event_before[column_name] = ''
+									event_before[column_name] = ""
 								elif column_type == 'json':
 									event_before[column_name] = self.__decode_dic_keys(event_after[column_name])
 							event_insert={"global_data":global_data,"event_after":event_after,  "event_before":event_before}
@@ -1345,9 +1336,12 @@ class mysql_source(object):
 						
 						if len(group_insert)>=self.replica_batch_size:
 							
-							self.logger.info("Max rows per batch reached. Writing %s. rows. Size in bytes: %s " % (len(group_insert), size_insert))
+							self.logger.info("Max rows per batch reached. Writing %s rows. Size in bytes: %s " % (len(group_insert), size_insert))
 							self.logger.debug("Master coordinates: %s" % (master_data, ))
-							self.pg_engine.write_batch(group_insert)
+							if self.pg_engine.dest_conn["use_gpss"] == True:
+								self.pg_engine.write_batch_gpss(group_insert)
+							else:
+								self.pg_engine.write_batch(group_insert)
 							size_insert=0
 							group_insert=[]
 							close_batch=True
@@ -1359,6 +1353,7 @@ class mysql_source(object):
 			self.logger.debug("writing the last %s events" % (len(group_insert), ))
 			self.pg_engine.write_batch(group_insert)
 			close_batch=True
+
 		
 		return [master_data, close_batch]
 	
@@ -1394,9 +1389,6 @@ class mysql_source(object):
 					replica_data=self.__read_replica_stream(batch_data)
 					master_data=replica_data[0]
 					close_batch=replica_data[1]
-					print(">>>in mysql read_replica")
-					print("master_data", master_data)
-					print("close_batch", close_batch)
 					if "gtid" in master_data:
 						master_data["Executed_Gtid_Set"] = self.__build_gtid_set(master_data["gtid"])
 					else:
@@ -1411,7 +1403,6 @@ class mysql_source(object):
 						else:
 							self.logger.debug("batch not saved. using old id_batch %s" % (self.id_batch))
 						if self.id_batch:
-							print("going to set bach_processed")
 							self.logger.debug("updating processed flag for id_batch %s", (id_batch))
 							self.pg_engine.set_batch_processed(id_batch)
 							self.id_batch=None
@@ -1427,8 +1418,6 @@ class mysql_source(object):
 		"""
 		self.logger.debug("starting init replica for source %s" % self.source)
 		self.__init_sync()
-		if self.pg_engine.dest_conn["use_gpss"] == True:
-			self.pg_engine.connectToGpss()
 		self.__check_mysql_config()
 		master_start = self.get_master_coordinates()
 		self.pg_engine.set_source_status("initialising")

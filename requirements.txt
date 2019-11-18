@@ -6,7 +6,7 @@ PyYAML==5.1.2
 tabulate==0.8.5
 rollbar==0.14.7
 Daemonize==2.5.0
-pandas==
+pandas==0.25.2
 
 grpcio==1.24.3
 grpcio-tools==1.24.3

@@ -492,8 +492,10 @@ class replica_engine(object):
 				self.mysql_source.read_replica()
 				time.sleep(self.sleep_loop)
 			except Exception:
-			    queue.put(traceback.format_exc())
-			    break
+				queue.put(traceback.format_exc())
+				if self.pg_engine.dest_conn["use_gpss"] == True:
+					self.pg_engine.disConnectGpss()
+				break
 	
 	def replay_replica(self, queue, log_replay):
 		"""
@@ -507,7 +509,6 @@ class replica_engine(object):
 			try:
 				tables_error = self.pg_engine.replay_replica()
 				if len(tables_error) > 0:
-					print(">>>len of table_error more than 0")
 					table_list = [item for sublist in tables_error for item in sublist]
 					tables_removed = "\n".join(table_list)
 					notifier_message = "There was an error during the replay of data. %s. The affected tables are no longer replicated." % (tables_removed)
@@ -515,7 +516,6 @@ class replica_engine(object):
 					self.notifier.send_message(notifier_message, 'error')
 				
 			except Exception as e:
-				print(">>>xception in replay_replica:global  ",e)
 				queue.put(traceback.format_exc())
 				break
 			time.sleep(self.sleep_loop)
@@ -634,14 +634,15 @@ class replica_engine(object):
 					else:
 						foreground = False
 						print("Starting the replica process for source %s" % (self.args.source))
-						keep_fds = [self.logger_fds]
 						
-						app_name = "%s_replica" % self.args.source
-						replica_daemon = Daemonize(app=app_name, pid=replica_pid, action=self.__run_replica, foreground=foreground , keep_fds=keep_fds)
-						try:
-							replica_daemon.start()
-						except:
-							print("The replica process is already started. Aborting the command.")
+					keep_fds = [self.logger_fds]
+						
+					app_name = "%s_replica" % self.args.source
+					replica_daemon = Daemonize(app=app_name, pid=replica_pid, action=self.__run_replica, foreground=foreground , keep_fds=keep_fds)
+					try:
+						replica_daemon.start()
+					except:
+						print("The replica process is already started. Aborting the command.")
 				
 	
 	def __stop_replica(self):
