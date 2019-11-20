@@ -579,13 +579,20 @@ class mysql_source(object):
 						csv_file = codecs.open(out_file, 'wb', self.charset)
 						csv_file.write(csv_data)
 						csv_file.close()
-					self.pg_engine.copy_data_gpss( out_file, loading_schema, table, column_list)				
+					try:
+						self.pg_engine.copy_data_gpss( out_file, loading_schema, table, column_list)	
+					except:
+						self.logger.debug("gpss failed, fall into normal copy_data")
+						if self.copy_mode == 'file':
+							csv_file = open(out_file, 'rb')
+						self.pg_engine.copy_data(csv_file, loading_schema, table, column_list)			
 				else:
 					if self.copy_mode == 'file':
 						csv_file = open(out_file, 'rb')
 					self.pg_engine.copy_data(csv_file, loading_schema, table, column_list)
 					csv_file.close()
-			except :
+			except Exception as e:
+				print("exception aaa:, ", e)
 				self.logger.info("Table %s.%s error in Greenplum copy, saving slice number for the fallback to insert statements " %  (loading_schema, table ))
 				slice_insert.append(slice)
 
@@ -595,8 +602,6 @@ class mysql_source(object):
 
 		self.cursor_unbuffered.close()
 		self.disconnect_db_unbuffered()
-		if self.pg_engine.dest_conn["use_gpss"] == True :
-			self.pg_engine.disConnectGpss()
 
 		if len(slice_insert)>0:
 			ins_arg={}
@@ -732,6 +737,10 @@ class mysql_source(object):
 				except:
 					self.logger.info("Could not copy the table %s. Excluding it from the replica." %(table) )
 					raise
+		
+		if self.pg_engine.dest_conn["use_gpss"] == True :
+			self.pg_engine.disConnectGpss()
+				
 	
 	def set_copy_max_memory(self):
 		"""

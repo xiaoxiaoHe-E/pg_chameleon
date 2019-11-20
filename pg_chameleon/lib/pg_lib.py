@@ -2442,7 +2442,7 @@ class pg_engine(object):
 				ddl_enum.append(sql_create_enum)
 				column_type=enum_type
 			if column_type == "character varying" or column_type == "character":
-				column_type="%s (%s)" % (column_type, str(column["character_maximum_length"]))
+				column_type="%s (%s)" % (column_type, str(column["CHARACTER_MAXIMUM_LENGTH"]))
 			if column_type == 'numeric':
 				column_type="%s (%s,%s)" % (column_type, str(column["numeric_precision"]), str(column["numeric_scale"]))
 			if column["EXTRA"] == "auto_increment":
@@ -3689,8 +3689,13 @@ class pg_engine(object):
 		columns = column_list.split("\",\"")   #column_list is a list like string(deleminated by "," and has a "" on each column name)
 		columns[0] = columns[0][1:]
 		columns[-1] = columns[-1][ :-1]
-		
-		csv_df = pd.read_csv(csv_data, sep=',', index_col=False, header=None)
+		#start timing
+		start_time = datetime.datetime.now()
+		try:
+			csv_df = pd.read_csv(csv_data, sep=',', index_col=False, header=None)
+		except Exception as e:
+			print("error when open file",csv_df,e)
+			
 		insOpt = gpss_pb2.InsertOption(
 			InsertColumns=columns,  # colum list to be inserted
 			TruncateTable=False,  # truncate the table before inserting or not
@@ -3708,6 +3713,7 @@ class pg_engine(object):
 									InsertOption=insOpt)
 		self.gpss_stub.Open(openReq)
 		myRowData = []
+		i_batch = 1
 		for index, line in csv_df.iterrows():
 			colData = []
 			for item in line:
@@ -3716,6 +3722,8 @@ class pg_engine(object):
 			myRowinBytes = myRow.SerializeToString()
 			myRowData.append(gpss_pb2.RowData(Data=myRowinBytes))
 			if index % self.gpss_conf["writeEvery"] == 0:   ##grpc max message length 4M
+				self.logger.debug("writing the %dth batch..."%i_batch)
+				i_batch = i_batch+1
 				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
 				self.gpss_stub.Write(writeReq)
 				myRowData = []
@@ -3728,13 +3736,8 @@ class pg_engine(object):
                                      MaxErrorRows=self.gpss_conf["MaxErrorRows"])
 		state = self.gpss_stub.Close(closeReq)
 
-		if state.ErrorCount != 0:
-			self.logger.debug("gpss error encountered, ", state.ErrorCount)
-			self.logger.debug("fall into normal copy_data")
-			csv_file_copy = open(csv_data, 'rb')
-			self.copy_data(csv_file_copy, schema, table, column_list)
-		else:
-			self.logger.debug("copy data by gpss finished")
+		self.logger.debug("copy data by gpss finished")
+		self.logger.debug("time consumed in write to gpdb: %f seconds" % (float((datetime.datetime.now() - start_time).seconds)))
 
 
 	def insert_data(self, schema, table, insert_data , column_list):

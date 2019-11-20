@@ -611,6 +611,10 @@ class replica_engine(object):
 		"""
 		
 		replica_pid = os.path.expanduser('%s/%s.pid' % (self.config["pid_dir"],self.args.source))
+		pid = os.getpid() 
+		pid_file = open(replica_pid, "a")
+		pid_file.write(str(pid))
+		pid_file.close
 
 		if self.args.source == "*":
 			print("You must specify a source name using the argument --source")
@@ -846,14 +850,15 @@ class replica_engine(object):
 					self.logger.info("Starting the maintenance on the source %s" % (self.args.source, ))
 					foreground = False
 					print("Starting the maintenance process for source %s" % (self.args.source))
-					keep_fds = [self.logger_fds]
+				
+				keep_fds = [self.logger_fds]
 					
-					app_name = "%s_maintenance" % self.args.source
-					maintenance_daemon = Daemonize(app=app_name, pid=maintenance_pid, action=self.pg_engine.run_maintenance, foreground=foreground , keep_fds=keep_fds)
-					try:
-						maintenance_daemon.start()
-					except:
-						print("The  maintenance process is already started. Aborting the command.")
+				app_name = "%s_maintenance" % self.args.source
+				maintenance_daemon = Daemonize(app=app_name, pid=maintenance_pid, action=self.pg_engine.run_maintenance, foreground=foreground , keep_fds=keep_fds)
+				try:
+					maintenance_daemon.start()
+				except:
+					print("The  maintenance process is already started. Aborting the command.")
 		
 	def __init_logger(self, logger_name):
 		"""
