@@ -1191,6 +1191,7 @@ class mysql_source(object):
 					schema_query = binlogevent.schema_list
 				
 				if binlogevent.query.strip().upper() not in self.statement_skip and schema_query in self.schema_mappings: 
+					print("binlog event when batch>0: ", binlogevent.query.strip().upper())
 					close_batch=True
 					destination_schema = self.schema_mappings[schema_query]
 					log_position = binlogevent.packet.log_pos
@@ -1199,7 +1200,11 @@ class mysql_source(object):
 					master_data["Time"] = event_time
 					master_data["gtid"] = next_gtid
 					if len(group_insert)>0:
-						self.pg_engine.write_batch(group_insert)
+						print("len of group_insert > 0 writing batch...")
+						if self.pg_engine.dest_conn["use_gpss"] == True:
+							self.pg_engine.write_batch_gpss(group_insert)
+						else:
+							self.pg_engine.write_batch(group_insert)
 						group_insert=[]
 					self.logger.info("QUERY EVENT - binlogfile %s, position %s.\n--------\n%s\n-------- " % (binlogfile, log_position, binlogevent.query))
 					sql_tokeniser.parse_sql(binlogevent.query)
@@ -1222,7 +1227,7 @@ class mysql_source(object):
 									self.logger.info("CONSISTENT POINT FOR TABLE %s REACHED  - binlogfile %s, position %s" % (table_key_dic, binlogfile, log_position))
 									self.pg_engine.set_consistent_table(table_name, destination_schema)
 									inc_tables = self.pg_engine.get_inconsistent_tables()
-							print("wether write_ddl: ", write_ddl)
+							#print("wether write_ddl: ", write_ddl)
 							if write_ddl:
 								event_time = binlogevent.timestamp
 								self.logger.debug("TOKEN: %s" % (token))
@@ -1457,8 +1462,3 @@ class mysql_source(object):
 			self.logger.critical(notifier_message)
 			self.notifier.send_message(notifier_message, 'critical')
 			raise
-		
-		
-		
-
-

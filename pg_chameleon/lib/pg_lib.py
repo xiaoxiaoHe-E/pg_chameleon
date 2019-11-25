@@ -2854,6 +2854,8 @@ class pg_engine(object):
 		'enm_binlog_event', 't_binlog_name', 'i_binlog_position', 'ts_event_datetime',
 		'jsb_event_after', 'jsb_event_before','t_query','i_my_event_time']
 
+		start_time = datetime.datetime.now()
+
 		insOpt = gpss_pb2.InsertOption(
 			InsertColumns=columns,  # colum list to be inserted
 			TruncateTable=False,  # truncate the table before inserting or not
@@ -2873,13 +2875,14 @@ class pg_engine(object):
 		self.gpss_stub.Open(openReq)
 		
 		index = 0
+		i_batch = 0
 		myRowData = []
 		for row_data in group_insert:
 			global_data = row_data["global_data"]
 			event_after = row_data["event_after"]
 			event_before = row_data["event_before"]
 			colData = []
-			colData.append( data_pb2.DBValue(Int64Value= 0) )  #event id , make it 0 as default
+			colData.append( data_pb2.DBValue( Int64Value= index) )  #event id , make it 0 as default
 			colData.append( data_pb2.DBValue( Int64Value=int(global_data["batch_id"]) ) )
 			colData.append( data_pb2.DBValue( StringValue=str(global_data["table"])) )
 			colData.append( data_pb2.DBValue( StringValue=str(global_data["schema"])) )
@@ -2894,7 +2897,10 @@ class pg_engine(object):
 			myRow = data_pb2.Row(Columns=colData)
 			myRowinBytes = gpss_pb2.RowData( Data = myRow.SerializeToString() )
 			myRowData.append(myRowinBytes)
-			if index%self.gpss_conf["writeEvery"] == 0:   ##grpc max message length 4M
+			index = index+1
+			if index % self.gpss_conf["writeEvery"] == 0:   ##grpc max message length 4M
+				self.logger.debug("writing the %dth batch.."%i_batch)
+				i_batch = i_batch+1
 				writeReq = gpss_pb2.WriteRequest(Session=self.gpss_session, Rows=myRowData)
 				self.gpss_stub.Write(writeReq)
 				myRowData = []
@@ -2906,7 +2912,8 @@ class pg_engine(object):
 		closeReq = gpss_pb2.CloseRequest(session=self.gpss_session,
                                      MaxErrorRows=self.gpss_conf["MaxErrorRows"])
 		state = self.gpss_stub.Close(closeReq)
-		
+		self.logger.info("time consumed in write incremental batch(%d tuples) to gpdb: %f seconds" % (index, float((datetime.datetime.now() - start_time).seconds) ))
+
 		if state.ErrorCount != 0:
 			self.logger.debug("gpss error encountered")
 			for e in state.ErrorRows:
