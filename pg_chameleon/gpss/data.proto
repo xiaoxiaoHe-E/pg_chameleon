@@ -1,0 +1,28 @@
+syntax = "proto3";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+package api;
+
+option java_multiple_files = true;
+
+message Row {
+    repeated DBValue Columns = 1;
+}
+
+message DBValue {
+    oneof DBType {
+        int32 Int32Value = 1;
+        int64 Int64Value = 2;
+        // uint32 Uint32Value = 3;
+        // uint64 Uint64Value = 4;
+        float Float32Value = 5;
+        double Float64Value = 6;
+        string StringValue = 7;
+        bytes BytesValue = 8;
+        // bool BoolValue = 9;
+        google.protobuf.Timestamp TimeStampValue = 10;
+        google.protobuf.NullValue NullValue = 11;
+        string OtherValue = 12;
+    }
+}

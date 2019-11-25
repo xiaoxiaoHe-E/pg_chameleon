@@ -3680,8 +3680,11 @@ class pg_engine(object):
 			:param table: the table name used in the COPY FROM command
 			:param column_list: A string with the list of columns to use in the COPY FROM command already quoted and comma separated
 		"""
+		start_time = datetime.datetime.now()
+
 		sql_copy='COPY "%s"."%s" (%s) FROM STDIN WITH NULL \'NULL\' CSV QUOTE \'"\' DELIMITER \',\' ESCAPE \'"\' ; ' % (schema, table, column_list)		
 		self.pgsql_cur.copy_expert(sql_copy,csv_file)
+		self.logger.info("time consumed in write total data to gpdb: %f seconds" % ( float((datetime.datetime.now() - start_time).seconds) ))
 
 
 	def copy_data_gpss(self, csv_data, schema, table, column_list):

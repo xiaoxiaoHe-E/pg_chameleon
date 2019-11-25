@@ -585,6 +585,7 @@ class mysql_source(object):
 						self.logger.debug("gpss failed, fall into normal copy_data")
 						if self.copy_mode == 'file':
 							csv_file = open(out_file, 'rb')
+						self.logger.debug("copy data of %d tuples through copy_expert"%(len(csv_results)))
 						self.pg_engine.copy_data(csv_file, loading_schema, table, column_list)			
 				else:
 					if self.copy_mode == 'file':
