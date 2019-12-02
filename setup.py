@@ -20,6 +20,7 @@ conf_dir = "/%s/pg_chameleon/configuration" % python_lib
 conn_dir = "/%s/pg_chameleon/connection" % python_lib
 sql_dir = "/%s/pg_chameleon/sql" % python_lib
 sql_up_dir = "/%s/pg_chameleon/%s" % (python_lib, sql_up_path)
+gpss_dir = "/%s/pg_chameleon/gpss" % python_lib
 
 
 data_files = []
@@ -32,14 +33,12 @@ sql_upgrade = ["%s/%s" % (sql_up_path, file) for file in listdir(sql_up_path) if
 sql_files = (sql_dir,sql_src)
 sql_up_files = (sql_up_dir,sql_upgrade)
 
-package_data = {'gpss': ['data.proto', 'gpss.proto','generate.sh']}
-
+grpc_files = (gpss_dir, ['data.proto', 'gpss.proto', 'generate.sh'])
 
 data_files.append(conf_files)
 data_files.append(sql_files)
 data_files.append(sql_up_files)
-data_files.append(package_data)
-
+data_files.append(grpc_files)
 
 
 setup(
