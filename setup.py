@@ -23,7 +23,8 @@ sql_up_dir = "/%s/pg_chameleon/%s" % (python_lib, sql_up_path)
 
 
 data_files = []
-conf_files = (conf_dir, ['configuration/config-example.yml'])
+conf_files = (conf_dir, ['configuration/config-example.yml',
+                         'configuration/gpss.yml'])
 
 sql_src = ['sql/create_schema.sql', 'sql/drop_schema.sql']
 sql_upgrade = ["%s/%s" % (sql_up_path, file) for file in listdir(sql_up_path) if isfile(join(sql_up_path, file))]
@@ -31,9 +32,13 @@ sql_upgrade = ["%s/%s" % (sql_up_path, file) for file in listdir(sql_up_path) if
 sql_files = (sql_dir,sql_src)
 sql_up_files = (sql_up_dir,sql_upgrade)
 
+package_data = {'gpss': ['data.proto', 'gpss.proto','generate.sh']}
+
+
 data_files.append(conf_files)
 data_files.append(sql_files)
 data_files.append(sql_up_files)
+data_files.append(package_data)
 
 
 

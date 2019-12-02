@@ -77,7 +77,9 @@ class replica_engine(object):
 			
 		local_conf = "%s/configuration/" % cham_dir 
 		self.global_conf_example = '%s/pg_chameleon/configuration/config-example.yml' % python_lib
-		self.local_conf_example = '%s/config-example.yml' % local_conf
+		self.global_conf_gpss = '%s/pg_chameleon/configuration/gpss.yml' % python_lib
+		self.local_conf_example = '%sconfig-example.yml' % local_conf
+		self.local_conf_gpss = '%sgpss.yml' % local_conf
 		
 		local_logs = "%s/logs/" % cham_dir 
 		local_pid = "%s/pid/" % cham_dir 
@@ -199,16 +201,18 @@ class replica_engine(object):
 			if os.path.getctime(self.global_conf_example)>os.path.getctime(self.local_conf_example):
 				print ("updating configuration example with %s" % self.local_conf_example)
 				copy(self.global_conf_example, self.local_conf_example)
+				copy(self.global_conf_gpss, self.local_conf_gpss)
 		else:
 			print ("copying configuration  example in %s" % self.local_conf_example)
 			copy(self.global_conf_example, self.local_conf_example)
+			copy(self.global_conf_gpss, self.local_conf_gpss)
 	
 	def load_config(self):
 		""" 
 			The method loads the configuration from the file specified in the args.config parameter.
 		"""
 		local_confdir = "%s/.pg_chameleon/configuration/" % os.path.expanduser('~')	
-		self.config_file = '%s/%s.yml'%(local_confdir, self.args.config)
+		self.config_file = '%s%s.yml'%(local_confdir, self.args.config)
 		
 		if not os.path.isfile(self.config_file):
 			print("**FATAL - configuration file missing. Please ensure the file %s is present." % (self.config_file))

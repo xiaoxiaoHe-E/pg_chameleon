@@ -4,7 +4,7 @@ gpdbPort:  5432
 
 username: "gpadmin"
 password: "changeme"
-database: "pgdb"
+database: "testdb"
 useSSL: False
 
 ErrorLimitCount: 10          
