@@ -38,7 +38,7 @@ grpc_files = (gpss_dir, ['gpss/data.proto', 'gpss.proto', 'generate.sh'])
 data_files.append(conf_files)
 data_files.append(sql_files)
 data_files.append(sql_up_files)
-data_files.append(grpc_files)
+#data_files.append(grpc_files)
 
 
 setup(
