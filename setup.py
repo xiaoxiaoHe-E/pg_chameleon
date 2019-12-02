@@ -20,7 +20,7 @@ conf_dir = "/%s/pg_chameleon/configuration" % python_lib
 conn_dir = "/%s/pg_chameleon/connection" % python_lib
 sql_dir = "/%s/pg_chameleon/sql" % python_lib
 sql_up_dir = "/%s/pg_chameleon/%s" % (python_lib, sql_up_path)
-gpss_dir = "/%s/pg_chameleon/gpss" % python_lib
+gpss_dir = "/%s/pg_chameleon/pg_chameleon/gpss" % python_lib
 
 
 data_files = []
