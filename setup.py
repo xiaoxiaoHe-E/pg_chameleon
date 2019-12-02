@@ -74,7 +74,11 @@ setup(
 		"pg_chameleon.lib.global_lib",
 		"pg_chameleon.lib.mysql_lib",
 		"pg_chameleon.lib.pg_lib",
-		"pg_chameleon.lib.sql_util"
+		"pg_chameleon.lib.sql_util",
+		"pg_chameleon.gpss.data_pb2_grpc",
+		"pg_chameleon.gpss.data_pb2",
+		"pg_chameleon.gpss.gpss_pb2_grpc",
+		"pg_chameleon.gpss.gpss_pb2",
 	],
 	scripts=[
 		"scripts/chameleon.py", 
@@ -88,7 +92,12 @@ setup(
 		'PyYAML>=3.12', 
 		'tabulate>=0.8.1', 
 		'daemonize>=2.4.7', 
-		'rollbar>=0.13.17'
+		'rollbar>=0.13.17',
+		'Daemonize>=2.5.0',
+		'pandas>=0.25.2',
+		'grpcio>=1.24.3',
+		'grpcio-tools>=1.24.3',
+		'python-dateutil>=2.8.0'
 	],
 	data_files = data_files, 
 	include_package_data = True, 
