@@ -1,17 +1,17 @@
-host: "127.0.0.1"
-gpssListenPort: "5000"
-gpdbPort:  5432
+host: "127.0.0.1"                   # gpss host
+gpssListenPort: "5000"              # gpss port
+gpdbPort:  5432                     # gpdb port
 
-username: "gpadmin"
-password: "changeme"
-database: "testdb"
-useSSL: False
+username: "gpadmin"                 # gpdb usrname
+password: "changeme"                # gpdb password
+database: "testdb"                    # gpdb database
+useSSL: False                       # whether use SSL 
 
-ErrorLimitCount: 10          
-ErrorLimitPercentage: 10
+ErrorLimitCount: 10                 # insert error limit count
+ErrorLimitPercentage: 10            # insert error limit percentage
 
-MaxErrorRows: 10
+MaxErrorRows: 10                    # -1: return all, 0: nothing, positive: max rows.
 
-writeEvery: 3000 
-#for grpc has a max message length (4M) restriction
-#send write request every 3000 lines
+# for grpc has a max message length (4M) restriction
+# here send write request every 3000 lines
+writeEvery: 3000

@@ -2,8 +2,8 @@
 # global settings
 pid_dir: '~/.pg_chameleon/pid/'
 log_dir: '~/.pg_chameleon/logs/'
-log_dest: file
-log_level: info
+log_dest: file                  # file or stdout
+log_level: info                 # info or debug
 log_days_keep: 10
 rollbar_key: ''
 rollbar_env: ''
@@ -26,7 +26,7 @@ gp_conn:
   password: "never_commit_password"
   database: "db_replica"
   charset: "utf8"
-  use_gpss: true  # if true, need to modify gpss.yml
+  use_gpss: true                     # if true, need to modify gpss.yml and start gpss service
 
 sources:
   mysql:
@@ -38,6 +38,8 @@ sources:
       charset: 'utf8'
       connect_timeout: 10
     schema_mappings:
+     # mysql database name : greenplum schema name
+     # in greenplum, data will be copied into database db_replica, schema loxodonta_africana
       delphis_mediterranea: loxodonta_africana
     limit_tables:
       - delphis_mediterranea.foo
@@ -63,5 +65,5 @@ sources:
       insert:
         - delphis_mediterranea.foo  # skips inserts on delphis_mediterranea.foo
       delete:
-        - delphis_mediterranea  # skips deletes on schema delphis_mediterranea
+        - delphis_mediterranea      # skips deletes on schema delphis_mediterranea
       update:

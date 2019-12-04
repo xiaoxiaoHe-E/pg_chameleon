@@ -616,7 +616,7 @@ class replica_engine(object):
 		
 		replica_pid = os.path.expanduser('%s/%s.pid' % (self.config["pid_dir"],self.args.source))
 		pid = os.getpid() 
-		pid_file = open(replica_pid, "a")
+		pid_file = open(replica_pid, "w")
 		pid_file.write(str(pid))
 		pid_file.close
 
